@@ -73,7 +73,7 @@ def fetch_news(tickers, start_date, end_date, save_dir="data/raw/news/"):
     print("Finished fetching news.")
 
 if __name__ == "__main__":
-    tickers = ["AAPL", "MFST", "TSLA"]
+    tickers = ["AAPL", "MSFT", "TSLA"]
     start_date = "2025-04-01"
     end_date = "2025-05-01"
     fetch_news(tickers, start_date, end_date)
