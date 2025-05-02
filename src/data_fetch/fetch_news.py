@@ -34,8 +34,9 @@ def filter_headlines_before_close(news_list, date):
     filtered = []
     for item in news_list:
         try:
-            utc_time = datetime.utcfromtimestamp(item["datetime"])
-            local_time = utc_time.replace(tzinfo=timezone("UTC")).astimezone(eastern)
+            # FIX: Convert milliseconds to seconds
+            utc_time = datetime.fromtimestamp(item["datetime"], tz=timezone('UTC'))
+            local_time = utc_time.astimezone(eastern)
             if local_time <= market_close:
                 filtered.append({
                     "datetime": local_time.isoformat(),
@@ -64,13 +65,16 @@ def fetch_news(tickers, start_date, end_date, save_dir="data/raw/news/"):
                 save_path = os.path.join(save_dir, f"{ticker}_{date_str}.json")
                 with open(save_path, "w") as f:
                     json.dump(filtered_news, f, indent=2)
+
             sleep(1.2)  # To avoid API rate limits
+
         current_date += timedelta(days=1)
     
     print("Finished fetching news.")
 
 if __name__ == "__main__":
-    tickers = ["AAPL", "MSFT"]
-    start_date = "2024-01-01"
-    end_date = "2024-03-31"
+    tickers = ["AAPL", "MFST", "TSLA"]
+    start_date = "2025-04-01"
+    end_date = "2025-05-01"
     fetch_news(tickers, start_date, end_date)
+
