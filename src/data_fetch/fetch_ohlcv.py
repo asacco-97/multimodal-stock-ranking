@@ -27,7 +27,7 @@ def fetch_ohlcv(tickers, start_date, end_date, save_dir="data/raw/ohlcv/"):
     print("Finished fetching OHLCV data.")
 
 if __name__ == "__main__":
-    tickers = ["AAPL", "MSFT", "TSLA"]
-    start_date = "2025-04-01"
+    tickers = ["AAPL", "MSFT", "TSLA", "AMZN", "JPM", "UNH", "XOM", "HD", "NVDA", "KO"]
+    start_date = "2024-05-01"
     end_date = "2025-05-01"
     fetch_ohlcv(tickers, start_date, end_date)
