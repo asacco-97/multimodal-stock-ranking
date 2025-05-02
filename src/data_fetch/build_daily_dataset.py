@@ -31,8 +31,8 @@ def build_dataset(ohlcv_data, news_data, output_file="data/processed/daily_datas
         df = df.sort_values("Date").reset_index(drop=True)
         for i in range(len(df) - 1):  # Use i+1 for next-day return
             date = df.loc[i, "Date"]
-            next_day_close = df.loc[i + 1, "Close"]
-            today_close = df.loc[i, "Close"]
+            next_day_close = float(df.loc[i + 1, "Close"])
+            today_close = float(df.loc[i, "Close"])
             date_str = date.strftime("%Y-%m-%d")
             next_return = (next_day_close - today_close) / today_close
 
