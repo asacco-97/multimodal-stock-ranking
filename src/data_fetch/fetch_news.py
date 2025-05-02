@@ -5,8 +5,15 @@ import json
 from datetime import datetime, timedelta
 from time import sleep
 from pytz import timezone
+from dotenv import load_dotenv
 
-FINNHUB_API_KEY = "YOUR_FINNHUB_API_KEY"
+# Load .env into environment
+load_dotenv() 
+
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+
+if not FINNHUB_API_KEY:
+    raise ValueError("Finnhub API key not set. Please check your .env file.")
 
 def fetch_news_for_date(ticker, date, api_key=FINNHUB_API_KEY):
     url = (
