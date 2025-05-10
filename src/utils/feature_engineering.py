@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from ta.momentum import RSIIndicator
 from typing import Optional
+import itertools
 
 def add_trading_metrics(
     df: pd.DataFrame,
@@ -39,6 +40,61 @@ def add_trading_metrics(
 
     return df
 
+def exponential_smoothing(df, smooth_col, alpha=0.1):
+    """
+    Applies exponential smoothing to a given column in the DataFrame, separately by ticker.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing the stock data
+        smooth_col (str): Column name to apply smoothing (e.g., 'open', 'close')
+        alpha (float): Smoothing factor (0 < alpha <= 1)
+
+    Returns:
+        pd.Series: Exponentially smoothed values by ticker
+    """
+    smoothed_values = []
+
+    # Group by ticker to apply smoothing separately
+    for ticker, group in df.groupby('ticker'):
+        smoothed_group = []
+        
+        # Initialize the smoothed value for the first entry in the group
+        smoothed_value = group[smooth_col].iloc[0]
+        smoothed_group.append(smoothed_value)
+        
+        # Apply exponential smoothing to the group
+        for i in range(1, len(group)):
+            value = group[smooth_col].iloc[i]
+            smoothed_value = alpha * value + (1 - alpha) * smoothed_value
+            smoothed_group.append(smoothed_value)
+        
+        # Append the smoothed values for this group to the final list
+        smoothed_values.extend(smoothed_group)
+
+    return pd.Series(smoothed_values, index=df.index)
+
+def apply_exponential_smoothing(
+        df, 
+        smooth_cols = ["open", "close", "return_t+1"], 
+        alphas = [0.25, 0.75, 0.90]
+        ):
+
+    # All params combos
+    param_combinations = itertools.product(smooth_cols, alphas)
+
+    # Apply exponential smoothing
+    for (smooth_col, alpha) in param_combinations:
+        output_col = f"{smooth_col}_smoothed_alpha:{alpha}"
+        df[output_col] = exponential_smoothing(
+            df, 
+            smooth_col=smooth_col, 
+            alpha=alpha, 
+        )
+        if smooth_col == "return_t+1":
+            df[output_col.replace("_t+1", "")] = df[output_col].shift(1)
+
+    return df
+
 if __name__ == "__main__":
     import argparse
 
@@ -51,5 +107,6 @@ if __name__ == "__main__":
 
     df = pd.read_parquet(args.input)
     df = add_trading_metrics(df, price_col=args.price_col, return_col=args.return_col)
+    df = apply_exponential_smoothing(df)
     df.to_parquet(args.output, index=False)
-    print(f"Saved dataset with trading metrics to {args.output}")
+    print(f"Saved dataset with trading metrics and exponential smoothing to {args.output}")
