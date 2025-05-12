@@ -2,6 +2,7 @@
 import yfinance as yf
 import pandas as pd
 import os
+import time
 
 def fetch_ohlcv(tickers, start_date, end_date, save_dir="data/raw/ohlcv/"):
     os.makedirs(save_dir, exist_ok=True)
@@ -24,6 +25,10 @@ def fetch_ohlcv(tickers, start_date, end_date, save_dir="data/raw/ohlcv/"):
         # Save cleaned file
         save_path = os.path.join(save_dir, f"{ticker}_ohlcv.csv")
         df.to_csv(save_path, index=False)
+
+        # Add delay to avoid rate limite
+        time.sleep(5)  
+        
     print("Finished fetching OHLCV data.")
 
 if __name__ == "__main__":
