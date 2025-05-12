@@ -34,7 +34,7 @@ def add_trading_metrics(
 
     df["rsi_14"] = df.groupby("ticker")[price_col].transform(compute_rsi)
 
-    df["cumulative_return"] = df.groupby("ticker")[return_col].cumsum()
+    df["cumulative_return"] = df.groupby("ticker")[return_col].shift(1).cumsum()
     df["running_max"] = df.groupby("ticker")["cumulative_return"].cummax()
     df["drawdown"] = df["cumulative_return"] - df["running_max"]
 
