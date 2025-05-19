@@ -9,15 +9,9 @@ def fetch_ohlcv(tickers, start_date, end_date, save_dir="data/raw/ohlcv/"):
     
     for ticker in tickers:
         print(f"Fetching OHLCV for {ticker}")
-        df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=False, progress=False)
+        ticker_object = yf.Ticker("AAPL")
+        df = ticker_object.history(start=start_date, end=end_date, auto_adjust=False)
         df.reset_index(inplace=True)
-
-        # If the columns are a MultiIndex, flatten them to just the price type without the ticker
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # Drop rows where "Close" column contains the ticker name or non-numeric value
-        df = df[pd.to_numeric(df["Close"], errors="coerce").notnull()]
         
         # Convert all OHLCV columns to float
         df[["Open", "High", "Low", "Close", "Volume"]] = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
@@ -27,7 +21,7 @@ def fetch_ohlcv(tickers, start_date, end_date, save_dir="data/raw/ohlcv/"):
         df.to_csv(save_path, index=False)
 
         # Add delay to avoid rate limite
-        time.sleep(5)  
+        time.sleep(3)  
         
     print("Finished fetching OHLCV data.")
 
