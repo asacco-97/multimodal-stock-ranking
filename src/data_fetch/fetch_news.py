@@ -8,14 +8,18 @@ from pytz import timezone
 from dotenv import load_dotenv
 
 # Load .env into environment
-load_dotenv() 
+load_dotenv()
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
-if not FINNHUB_API_KEY:
-    raise ValueError("Finnhub API key not set. Please check your .env file.")
+# Note: API key check moved to function level (only checked when actually used)
 
-def fetch_news_for_date(ticker, date, api_key=FINNHUB_API_KEY):
+def fetch_news_for_date(ticker, date, api_key=None):
+    if api_key is None:
+        api_key = FINNHUB_API_KEY
+    if not api_key:
+        raise ValueError("Finnhub API key not set. Please add FINNHUB_API_KEY to your .env file.")
+
     url = (
         f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
         f"&from={date}&to={date}&token={api_key}"
