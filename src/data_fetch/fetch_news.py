@@ -5,10 +5,10 @@ import json
 from datetime import datetime, timedelta
 from time import sleep
 from pytz import timezone
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# Load .env into environment
-load_dotenv()
+# Load .env into environment - find_dotenv() searches up the directory tree
+load_dotenv(find_dotenv())
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 

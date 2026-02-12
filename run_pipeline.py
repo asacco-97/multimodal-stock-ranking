@@ -17,11 +17,12 @@ from src.data_fetch.fetch_news import fetch_news
 from src.data_fetch.build_daily_dataset import load_ohlcv_data, load_news_data, build_dataset
 from src.embeddings.embed_news import embed_news
 from src.utils.add_trading_metrics import add_trading_metrics
+from src.modeling.add_cross_sectional_features import add_all_cross_sectional_features
 
 def run_full_pipeline(
     n_equities: int = 1000,
-    start_date: str = "2020-01-01",
-    end_date: str = "2025-02-09",
+    start_date: str = "1995-01-01",
+    end_date: str = "2026-02-09",
     steps: Optional[list] = None
 ):
     """
@@ -32,11 +33,13 @@ def run_full_pipeline(
         start_date: Start date for historical data
         end_date: End date for historical data
         steps: List of steps to run (None = run all)
-               Options: ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed', 'features', 'merge']
+               Options: ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
+                        'features', 'merge', 'cross_sectional']
     """
 
     if steps is None:
-        steps = ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed', 'features', 'merge']
+        steps = ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
+                'features', 'merge', 'cross_sectional']
 
     print(f"\n{'='*80}")
     print(f"EQUITY DATA PIPELINE - Top {n_equities} US Equities by Liquidity")
@@ -201,22 +204,64 @@ def run_full_pipeline(
             print("Merging macro indicators...")
             merged_df = merge_macro_with_stocks(merged_df, macro_df)
 
-        # Save final dataset
+        # Save merged dataset
         final_path = "data/processed/final_dataset.parquet"
         merged_df.to_parquet(final_path, index=False)
+
+        print(f"\nMerged dataset saved to: {final_path}")
+        print(f"Shape: {merged_df.shape}")
+    else:
+        # Load existing merged data if skipping merge step
+        if os.path.exists("data/processed/final_dataset.parquet"):
+            merged_df = pd.read_parquet("data/processed/final_dataset.parquet")
+        else:
+            print("Warning: Merged dataset not found, skipping remaining steps")
+            return None
+
+    # ================================================================================
+    # STEP 9: Add Cross-Sectional Features for Modeling
+    # ================================================================================
+    if 'cross_sectional' in steps:
+        print("\n" + "="*80)
+        print("STEP 9: Adding Cross-Sectional Features for Modeling")
+        print("="*80)
+
+        # Add cross-sectional features
+        modeling_df = add_all_cross_sectional_features(
+            merged_df,
+            sector_col=None,  # Set to column name if you have sector data
+            target_type='quintile'  # quintile, decile, binary_top_bottom, continuous_rank
+        )
+
+        # Save modeling dataset
+        modeling_path = "data/processed/modeling_dataset.parquet"
+        modeling_df.to_parquet(modeling_path, index=False)
+
+        print(f"\nModeling dataset saved to: {modeling_path}")
+        print(f"Shape: {modeling_df.shape}")
+        print(f"Features for modeling: {len([c for c in modeling_df.columns if c not in ['ticker', 'date', 'target']])}")
 
         print(f"\n{'='*80}")
         print(f"PIPELINE COMPLETE!")
         print(f"{'='*80}")
-        print(f"\nFinal dataset saved to: {final_path}")
-        print(f"Shape: {merged_df.shape}")
+        print(f"\nFinal modeling dataset ready at: {modeling_path}")
+        print(f"Tickers: {modeling_df['ticker'].nunique()}")
+        print(f"Date range: {modeling_df['date'].min()} to {modeling_df['date'].max()}")
+
+        if 'target' in modeling_df.columns:
+            print(f"\nTarget variable distribution:")
+            print(modeling_df['target'].value_counts().sort_index())
+
+        return modeling_df
+    else:
+        print(f"\n{'='*80}")
+        print(f"PIPELINE COMPLETE!")
+        print(f"{'='*80}")
+        print(f"\nMerged dataset saved to: {final_path}")
         print(f"Tickers: {merged_df['ticker'].nunique()}")
         print(f"Date range: {merged_df['date'].min()} to {merged_df['date'].max()}")
-        print(f"\nFeatures: {list(merged_df.columns)}")
 
         return merged_df
-
-    return None
 
 if __name__ == "__main__":
     import argparse

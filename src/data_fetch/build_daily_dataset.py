@@ -36,6 +36,14 @@ def build_dataset(ohlcv_data, news_data, output_file="data/processed/daily_datas
             date_str = date.strftime("%Y-%m-%d")
             next_return = (next_day_close - today_close) / today_close
 
+            # Calculate 4-week (20 trading day) forward return
+            # Check if we have enough data for 20-day forward return
+            if i + 20 < len(df):
+                future_20d_close = float(df.loc[i + 20, "Close"])
+                return_20d = (future_20d_close - today_close) / today_close
+            else:
+                return_20d = None
+
             row = {
                 "ticker": ticker,
                 "date": date_str,
@@ -44,7 +52,8 @@ def build_dataset(ohlcv_data, news_data, output_file="data/processed/daily_datas
                 "low": df.loc[i, "Low"],
                 "close": df.loc[i, "Close"],
                 "volume": df.loc[i, "Volume"],
-                "return_t+1": next_return
+                "return_t+1": next_return,
+                "return_t+20": return_20d
             }
 
             # Add headlines if available

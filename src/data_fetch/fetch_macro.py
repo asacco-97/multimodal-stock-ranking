@@ -9,10 +9,10 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import requests
 from time import sleep
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables - find_dotenv() searches up the directory tree
+load_dotenv(find_dotenv())
 
 # You'll need to get a free API key from https://fred.stlouisfed.org/docs/api/api_key.html
 FRED_API_KEY = os.getenv("FRED_API_KEY")
