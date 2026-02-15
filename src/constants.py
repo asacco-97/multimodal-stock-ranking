@@ -76,6 +76,12 @@ DATA_DICTIONARY = {
     'max_drawdown_60d': 'Maximum drawdown over the past 60 days',
 
     # ------------------------------------------------------------------------
+    # Fundamental - Quarterly Metadata (Point-in-Time)
+    # ------------------------------------------------------------------------
+    'quarter_end_date': 'Last day of the fiscal quarter for the fundamentals being used',
+    'report_date': 'Date when quarterly fundamentals became available (quarter_end + reporting lag)',
+
+    # ------------------------------------------------------------------------
     # Fundamental - Valuation Ratios
     # ------------------------------------------------------------------------
     'market_cap': 'Market capitalization: share price × shares outstanding',
@@ -105,6 +111,23 @@ DATA_DICTIONARY = {
     # ------------------------------------------------------------------------
     'revenue_growth': 'Year-over-year revenue growth rate (as decimal)',
     'earnings_growth': 'Year-over-year earnings growth rate (as decimal)',
+    'revenue_growth_qoq': 'Quarter-over-quarter revenue growth rate',
+    'revenue_growth_yoy': 'Year-over-year revenue growth rate (comparing to 4 quarters ago)',
+    'earnings_growth_qoq': 'Quarter-over-quarter earnings (net income) growth rate',
+    'earnings_growth_yoy': 'Year-over-year earnings growth rate (comparing to 4 quarters ago)',
+
+    # ------------------------------------------------------------------------
+    # Fundamental - Raw Financial Statement Items (Quarterly)
+    # ------------------------------------------------------------------------
+    'revenue': 'Total revenue for the quarter (from income statement)',
+    'net_income': 'Net income for the quarter (from income statement)',
+    'operating_income': 'Operating income for the quarter (from income statement)',
+    'gross_profit': 'Gross profit for the quarter (revenue - COGS)',
+    'ebitda': 'Earnings before interest, taxes, depreciation, and amortization',
+    'total_assets': 'Total assets (from balance sheet)',
+    'total_equity': 'Shareholders equity (from balance sheet)',
+    'current_assets': 'Current assets (from balance sheet)',
+    'current_liabilities': 'Current liabilities (from balance sheet)',
 
     # ------------------------------------------------------------------------
     # Fundamental - Financial Health
