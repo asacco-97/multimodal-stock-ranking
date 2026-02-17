@@ -280,10 +280,7 @@ def create_target_variable(df: pd.DataFrame,
 
 
 def add_all_cross_sectional_features(df: pd.DataFrame,
-                                      sector_col: Optional[str] = 'sector',
-                                      forward_days: int = 1,
-                                      target_type: str = 'quintile',
-                                      price_col: str = 'close') -> pd.DataFrame:
+                                      sector_col: Optional[str] = 'sector') -> pd.DataFrame:
     """
     Main function to add all cross-sectional features at once.
 
@@ -294,14 +291,13 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
     4. Sector ranks (if sector column exists)
     5. Quintile buckets for key features
     6. Rank momentum (changes in ranks over time)
-    7. Target variable for modeling
+
+    Target variables are NOT created here. Use src.utils.target_builder
+    to add forward returns and binned targets separately.
 
     Args:
         df: Input DataFrame with merged data
         sector_col: Column containing sector information (None to skip sector features)
-        forward_days: Number of days forward to calculate returns for target
-        target_type: Type of target variable to create
-        price_col: Column to use for price (default 'close')
 
     Returns:
         DataFrame with all cross-sectional features added
@@ -374,13 +370,8 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
     if rank_features:
         df = add_rank_changes(df, rank_features) # Limit to 5 features to avoid too many columns
 
-    # 6. Create target variable
-    print(f"  - Creating target variable (type: {target_type}, forward_days: {forward_days})...")
-    df = create_target_variable(df, forward_days=forward_days, target_type=target_type, price_col=price_col)
-
-    print(f"✓ Added cross-sectional features. New shape: {df.shape}")
-    target_col = f'target_{forward_days}d'
-    print(f"  Total features: {len([c for c in df.columns if c not in ['ticker', 'date', target_col]])}")
+    print(f"Added cross-sectional features. New shape: {df.shape}")
+    print(f"  Total features: {len([c for c in df.columns if c not in ['ticker', 'date']])}")
 
     return df
 
@@ -395,11 +386,6 @@ if __name__ == "__main__":
                        help="Output parquet file")
     parser.add_argument("--sector_col", type=str, default=None,
                        help="Column containing sector information (optional)")
-    parser.add_argument("--target_type", type=str, default="quintile",
-                       choices=['quintile', 'decile', 'binary_top_bottom', 'continuous_rank'],
-                       help="Type of target variable to create")
-    parser.add_argument("--forward_days", type=int, default=1,
-                       help="Number of days forward to calculate returns for target (e.g., 1 for next day, 20 for 4 weeks)")
 
     args = parser.parse_args()
 
@@ -415,8 +401,6 @@ if __name__ == "__main__":
     df_modeling = add_all_cross_sectional_features(
         df,
         sector_col=args.sector_col,
-        forward_days=args.forward_days,
-        target_type=args.target_type
     )
 
     # Save
@@ -429,7 +413,3 @@ if __name__ == "__main__":
     print(f"\nSample of new features:")
     new_cols = [c for c in df_modeling.columns if c not in df.columns]
     print(new_cols[:20])
-
-    print(f"\nTarget distribution:")
-    if 'target' in df_modeling.columns:
-        print(df_modeling['target'].value_counts().sort_index())

@@ -11,7 +11,11 @@ from typing import Optional
 # Import data fetching modules
 from src.data_fetch.get_universe import get_top_n_equities_by_liquidity, load_universe
 from src.data_fetch.fetch_ohlcv import fetch_ohlcv_batch, load_ohlcv_combined
-from src.data_fetch.fetch_fundamentals import fetch_fundamentals_batch, merge_fundamentals_with_prices
+from src.data_fetch.fetch_fundamentals_quarterly import (
+    fetch_all_quarterly_fundamentals,
+    fetch_current_valuation_metrics,
+    merge_fundamentals_point_in_time
+)
 from src.data_fetch.fetch_macro import fetch_all_macro_indicators, merge_macro_with_stocks
 from src.data_fetch.fetch_news import fetch_news
 from src.data_fetch.build_daily_dataset import load_ohlcv_data, load_news_data, build_dataset
@@ -23,7 +27,8 @@ def run_full_pipeline(
     n_equities: int = 1000,
     start_date: str = "1995-01-01",
     end_date: str = "2026-02-09",
-    steps: Optional[list] = None
+    steps: Optional[list] = None,
+    data_tag: Optional[str] = None
 ):
     """
     Run the complete data pipeline for medium-term equity forecasting.
@@ -35,15 +40,28 @@ def run_full_pipeline(
         steps: List of steps to run (None = run all)
                Options: ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
                         'features', 'merge', 'cross_sectional']
+        data_tag: Unique tag for this run (default: auto-generated timestamp)
     """
 
     if steps is None:
         steps = ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
                 'features', 'merge', 'cross_sectional']
 
+    if data_tag is None:
+        data_tag = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Create output directories for this run
+    raw_dir = f"data/raw/{data_tag}"
+    processed_dir = f"data/processed/{data_tag}"
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(processed_dir, exist_ok=True)
+
     print(f"\n{'='*80}")
     print(f"EQUITY DATA PIPELINE - Top {n_equities} US Equities by Liquidity")
     print(f"Date Range: {start_date} to {end_date}")
+    print(f"Data Tag: {data_tag}")
+    print(f"Raw Dir: {raw_dir}")
+    print(f"Processed Dir: {processed_dir}")
     print(f"Steps: {', '.join(steps)}")
     print(f"{'='*80}\n")
 
@@ -76,27 +94,49 @@ def run_full_pipeline(
             tickers=tickers,
             start_date=start_date,
             end_date=end_date,
-            save_dir="data/raw/ohlcv/"
+            save_dir=f"{raw_dir}/ohlcv/"
         )
     else:
         print("\nSkipping OHLCV fetch - loading existing data...")
-        ohlcv_df = load_ohlcv_combined("data/raw/ohlcv/")
+        ohlcv_df = load_ohlcv_combined(f"{raw_dir}/ohlcv/")
 
     # ================================================================================
-    # STEP 3: Fetch Fundamental Data
+    # STEP 3: Fetch Fundamental Data (Quarterly with Point-in-Time)
     # ================================================================================
     if 'fundamentals' in steps:
         print("\n" + "="*80)
-        print("STEP 3: Fetching Fundamental Data")
+        print("STEP 3: Fetching Quarterly Fundamental Data (Point-in-Time)")
         print("="*80)
+        print("Using 45-day reporting lag to prevent look-ahead bias")
 
-        fundamentals_df = fetch_fundamentals_batch(
+        # Fetch quarterly fundamentals
+        fundamentals_df = fetch_all_quarterly_fundamentals(
             tickers=tickers,
-            save_dir="data/raw/fundamentals/"
+            save_dir=f"{raw_dir}/fundamentals_quarterly/",
+            reporting_lag_days=45  # Standard 10-Q filing deadline
         )
+
+        # Fetch sector/industry info (doesn't change much, can use current)
+        print("\nFetching sector/industry classifications...")
+        valuation_data = []
+        for i, ticker in enumerate(tickers[:100]):  # Limit to avoid rate limits, can fetch more later
+            if (i + 1) % 20 == 0:
+                print(f"  Progress: {i + 1}/100")
+            val = fetch_current_valuation_metrics(ticker)
+            if val:
+                valuation_data.append(val)
+
+        valuation_df = pd.DataFrame(valuation_data)
+        valuation_df.to_csv(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv", index=False)
     else:
-        print("\nSkipping fundamentals fetch - loading existing data...")
-        fundamentals_df = pd.read_csv("data/raw/fundamentals/fundamentals_current.csv")
+        print("\nSkipping fundamentals fetch - loading existing quarterly data...")
+        if os.path.exists(f"{raw_dir}/fundamentals_quarterly/quarterly_fundamentals.parquet"):
+            fundamentals_df = pd.read_parquet(f"{raw_dir}/fundamentals_quarterly/quarterly_fundamentals.parquet")
+            valuation_df = pd.read_csv(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv") if os.path.exists(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv") else None
+        else:
+            print("Warning: No quarterly fundamentals found. Run with --steps fundamentals first.")
+            fundamentals_df = None
+            valuation_df = None
 
     # ================================================================================
     # STEP 4: Fetch Macroeconomic Data
@@ -109,11 +149,11 @@ def run_full_pipeline(
         macro_df = fetch_all_macro_indicators(
             start_date=start_date,
             end_date=end_date,
-            save_dir="data/raw/macro/"
+            save_dir=f"{raw_dir}/macro/"
         )
     else:
         print("\nSkipping macro fetch - loading existing data...")
-        macro_df = pd.read_csv("data/raw/macro/macro_indicators.csv")
+        macro_df = pd.read_csv(f"{raw_dir}/macro/macro_indicators.csv")
         macro_df['date'] = pd.to_datetime(macro_df['date'])
 
     # ================================================================================
@@ -139,10 +179,10 @@ def run_full_pipeline(
         print("STEP 6: Embedding News Headlines")
         print("="*80)
 
-        if os.path.exists("data/processed/daily_dataset.csv"):
+        if os.path.exists(f"{processed_dir}/daily_dataset.csv"):
             embed_news(
-                input_path="data/processed/daily_dataset.csv",
-                output_path="data/processed/daily_with_finbert.parquet"
+                input_path=f"{processed_dir}/daily_dataset.csv",
+                output_path=f"{processed_dir}/daily_with_finbert.parquet"
             )
         else:
             print("Skipping embedding - no daily_dataset.csv found")
@@ -157,11 +197,9 @@ def run_full_pipeline(
 
         # Make sure we have OHLCV data
         if ohlcv_df.empty:
-            ohlcv_df = load_ohlcv_combined("data/raw/ohlcv/")
+            ohlcv_df = load_ohlcv_combined(f"{raw_dir}/ohlcv/")
 
-        # Calculate returns
         ohlcv_df = ohlcv_df.sort_values(['ticker', 'date']).reset_index(drop=True)
-        ohlcv_df['return_t+1'] = ohlcv_df.groupby('ticker')['Close'].transform(lambda x: x.pct_change().shift(-1))
 
         # Rename columns to lowercase for consistency
         ohlcv_df.rename(columns={
@@ -172,13 +210,13 @@ def run_full_pipeline(
             'Volume': 'volume'
         }, inplace=True)
 
-        # Add trading metrics
-        ohlcv_df = add_trading_metrics(ohlcv_df, price_col="close", return_col="return_t+1")
+        # Add trading metrics (uses backward-looking returns only, no future data)
+        ohlcv_df = add_trading_metrics(ohlcv_df, price_col="close")
 
         # Save intermediate result
-        os.makedirs("data/processed", exist_ok=True)
-        ohlcv_df.to_parquet("data/processed/ohlcv_with_features.parquet", index=False)
-        print("Saved: data/processed/ohlcv_with_features.parquet")
+        ohlcv_path = f"{processed_dir}/ohlcv_with_features.parquet"
+        ohlcv_df.to_parquet(ohlcv_path, index=False)
+        print(f"Saved: {ohlcv_path}")
 
     # ================================================================================
     # STEP 8: Merge All Data Sources
@@ -189,15 +227,20 @@ def run_full_pipeline(
         print("="*80)
 
         # Load OHLCV with features
-        if os.path.exists("data/processed/ohlcv_with_features.parquet"):
-            merged_df = pd.read_parquet("data/processed/ohlcv_with_features.parquet")
+        ohlcv_path = f"{processed_dir}/ohlcv_with_features.parquet"
+        if os.path.exists(ohlcv_path):
+            merged_df = pd.read_parquet(ohlcv_path)
         else:
             merged_df = ohlcv_df
 
-        # Merge fundamentals
+        # Merge fundamentals (point-in-time to prevent look-ahead bias)
         if fundamentals_df is not None and not fundamentals_df.empty:
-            print("Merging fundamentals...")
-            merged_df = merge_fundamentals_with_prices(merged_df, fundamentals_df)
+            print("Merging quarterly fundamentals (point-in-time)...")
+            merged_df = merge_fundamentals_point_in_time(
+                merged_df,
+                fundamentals_df,
+                valuation_df=valuation_df if 'valuation_df' in locals() else None
+            )
 
         # Merge macro
         if macro_df is not None and not macro_df.empty:
@@ -205,15 +248,16 @@ def run_full_pipeline(
             merged_df = merge_macro_with_stocks(merged_df, macro_df)
 
         # Save merged dataset
-        final_path = "data/processed/final_dataset.parquet"
+        final_path = f"{processed_dir}/final_dataset.parquet"
         merged_df.to_parquet(final_path, index=False)
 
         print(f"\nMerged dataset saved to: {final_path}")
         print(f"Shape: {merged_df.shape}")
     else:
         # Load existing merged data if skipping merge step
-        if os.path.exists("data/processed/final_dataset.parquet"):
-            merged_df = pd.read_parquet("data/processed/final_dataset.parquet")
+        final_path = f"{processed_dir}/final_dataset.parquet"
+        if os.path.exists(final_path):
+            merged_df = pd.read_parquet(final_path)
         else:
             print("Warning: Merged dataset not found, skipping remaining steps")
             return None
@@ -226,38 +270,39 @@ def run_full_pipeline(
         print("STEP 9: Adding Cross-Sectional Features for Modeling")
         print("="*80)
 
-        # Add cross-sectional features
+        # Add cross-sectional features (no target creation — use target_builder separately)
         modeling_df = add_all_cross_sectional_features(
             merged_df,
             sector_col=None,  # Set to column name if you have sector data
-            target_type='quintile'  # quintile, decile, binary_top_bottom, continuous_rank
         )
 
         # Save modeling dataset
-        modeling_path = "data/processed/modeling_dataset.parquet"
+        modeling_path = f"{processed_dir}/modeling_dataset.parquet"
         modeling_df.to_parquet(modeling_path, index=False)
 
         print(f"\nModeling dataset saved to: {modeling_path}")
         print(f"Shape: {modeling_df.shape}")
-        print(f"Features for modeling: {len([c for c in modeling_df.columns if c not in ['ticker', 'date', 'target']])}")
+        print(f"Features: {len([c for c in modeling_df.columns if c not in ['ticker', 'date']])}")
 
         print(f"\n{'='*80}")
         print(f"PIPELINE COMPLETE!")
         print(f"{'='*80}")
-        print(f"\nFinal modeling dataset ready at: {modeling_path}")
+        print(f"\nData tag: {data_tag}")
+        print(f"Modeling dataset ready at: {modeling_path}")
         print(f"Tickers: {modeling_df['ticker'].nunique()}")
         print(f"Date range: {modeling_df['date'].min()} to {modeling_df['date'].max()}")
-
-        if 'target' in modeling_df.columns:
-            print(f"\nTarget variable distribution:")
-            print(modeling_df['target'].value_counts().sort_index())
+        print(f"\nTo add targets, use:")
+        print(f"  from src.utils.target_builder import build_targets")
+        print(f"  df = pd.read_parquet('{modeling_path}')")
+        print(f"  df = build_targets(df)")
 
         return modeling_df
     else:
         print(f"\n{'='*80}")
         print(f"PIPELINE COMPLETE!")
         print(f"{'='*80}")
-        print(f"\nMerged dataset saved to: {final_path}")
+        print(f"\nData tag: {data_tag}")
+        print(f"Merged dataset saved to: {final_path}")
         print(f"Tickers: {merged_df['ticker'].nunique()}")
         print(f"Date range: {merged_df['date'].min()} to {merged_df['date'].max()}")
 
@@ -271,6 +316,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_date", type=str, default="2020-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default="2025-02-09", help="End date (YYYY-MM-DD)")
     parser.add_argument("--steps", type=str, help="Comma-separated steps to run (default: all)")
+    parser.add_argument("--data_tag", type=str, default=None, help="Unique tag for this run (default: auto-generated timestamp)")
 
     args = parser.parse_args()
 
@@ -285,5 +331,6 @@ if __name__ == "__main__":
         n_equities=args.n_equities,
         start_date=args.start_date,
         end_date=args.end_date,
-        steps=steps
+        steps=steps,
+        data_tag=args.data_tag
     )

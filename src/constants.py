@@ -35,11 +35,9 @@ DATA_DICTIONARY = {
     'return_t+20': 'Forward 20-day return (4 weeks): (close_t+20 - close_t) / close_t',
     'return_t+60': 'Forward 60-day return (3 months): (close_t+60 - close_t) / close_t',
 
-    # Target variables (created from forward returns)
-    'target_1d': 'Target variable based on 1-day forward returns (quintile/decile ranking)',
-    'target_5d': 'Target variable based on 5-day forward returns (quintile/decile ranking)',
-    'target_20d': 'Target variable based on 20-day forward returns (quintile/decile ranking)',
-    'target_60d': 'Target variable based on 60-day forward returns (quintile/decile ranking)',
+    # Binned target variables (created by target_builder)
+    # Pattern: return_t+{period}_{n}bin = cross-sectional quantile bin (0 to n-1)
+    # Examples: return_t+1_5bin, return_t+10_4bin, return_t+20_10bin
 
     # ------------------------------------------------------------------------
     # Technical Indicators - Momentum
@@ -261,9 +259,14 @@ FEATURE_CATEGORIES = {
 
     'price_volume': ['open', 'high', 'low', 'close', 'volume'],
 
-    'returns': ['return_t+1', 'return_t+5', 'return_t+20', 'return_t+60'],
+    'returns': ['return_t+1', 'return_t+10', 'return_t+20'],
 
-    'targets': ['target_1d', 'target_5d', 'target_20d', 'target_60d'],
+    'targets': [
+        # Binned targets: return_t+{period}_{n}bin
+        'return_t+1_4bin', 'return_t+1_5bin', 'return_t+1_10bin',
+        'return_t+10_4bin', 'return_t+10_5bin', 'return_t+10_10bin',
+        'return_t+20_4bin', 'return_t+20_5bin', 'return_t+20_10bin',
+    ],
 
     'technical_momentum': [
         'momentum_5', 'momentum_10', 'momentum_20', 'momentum_60d', 'momentum_120d',
@@ -390,12 +393,14 @@ def get_description(variable_name: str) -> str:
         return f"Change in rank of {base_feature} over {period}"
 
     elif variable_name.startswith('return_t+'):
+        # Check for binned target: return_t+10_5bin
+        if 'bin' in variable_name:
+            parts = variable_name.split('_')
+            period = parts[0].split('+')[1]  # e.g., '10'
+            n_bins = parts[-1].replace('bin', '')  # e.g., '5'
+            return f"Cross-sectional {n_bins}-quantile bin (0 to {int(n_bins)-1}) of {period}-day forward return"
         days = variable_name.split('+')[1]
         return f"Forward {days}-day return: (close_t+{days} - close_t) / close_t"
-
-    elif variable_name.startswith('target_') and variable_name.endswith('d'):
-        days = variable_name[7:-1]  # Extract number between 'target_' and 'd'
-        return f"Target variable based on {days}-day forward returns (quintile/decile ranking)"
 
     return 'No description available'
 
@@ -421,8 +426,10 @@ def get_category(variable_name: str) -> str:
             return 'cross_sectional'
 
     # Check for dynamic return/target columns
-    if variable_name.startswith('return_t+') or (variable_name.startswith('target_') and variable_name.endswith('d')):
-        return 'targets' if variable_name.startswith('target_') else 'returns'
+    if variable_name.startswith('return_t+'):
+        if 'bin' in variable_name:
+            return 'targets'
+        return 'returns'
 
     return 'unknown'
 

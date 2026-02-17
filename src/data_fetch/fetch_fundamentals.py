@@ -192,20 +192,65 @@ def fetch_fundamentals_batch(tickers: List[str], save_dir: str = "data/raw/funda
 
 def merge_fundamentals_with_prices(price_df: pd.DataFrame, fundamentals_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Merge fundamental data with price/return data.
-    Fundamental data is point-in-time, so it gets broadcast to all dates for each ticker.
+    Merge fundamental data with price data using point-in-time logic.
+
+    For each ticker/date in price_df, assigns the most recent quarterly
+    fundamentals that were available (reported) BEFORE that date.
+    This prevents look-ahead bias.
+
+    Requires fundamentals_df to have a date column ('report_date',
+    'quarter_end_date', or 'fetch_date') for temporal alignment.
 
     Args:
         price_df: DataFrame with columns ['ticker', 'date', ...price data...]
-        fundamentals_df: DataFrame with fundamental metrics per ticker
+        fundamentals_df: DataFrame with fundamental metrics and a date column
 
     Returns:
-        Merged DataFrame
+        Merged DataFrame with fundamentals from the prior quarter
     """
-    # Merge on ticker
-    merged = price_df.merge(fundamentals_df, on='ticker', how='left')
+    price_df = price_df.copy()
+    fundamentals_df = fundamentals_df.copy()
 
-    print(f"Merged fundamentals: {len(merged)} rows")
+    price_df['date'] = pd.to_datetime(price_df['date']).dt.as_unit('ns')
+
+    # Determine which date column to use for point-in-time alignment
+    if 'report_date' in fundamentals_df.columns:
+        merge_col = 'report_date'
+    elif 'quarter_end_date' in fundamentals_df.columns:
+        merge_col = 'quarter_end_date'
+    elif 'fetch_date' in fundamentals_df.columns:
+        merge_col = 'fetch_date'
+    else:
+        raise ValueError(
+            "fundamentals_df must have 'report_date', 'quarter_end_date', or 'fetch_date' "
+            "column for point-in-time merge. A simple ticker-only merge would broadcast "
+            "current fundamentals to all historical dates, causing look-ahead bias."
+        )
+
+    fundamentals_df[merge_col] = pd.to_datetime(fundamentals_df[merge_col]).dt.as_unit('ns')
+
+    # merge_asof requires left_on and right_on to be globally sorted
+    price_df = price_df.sort_values('date').reset_index(drop=True)
+    fundamentals_df = fundamentals_df.sort_values(merge_col).reset_index(drop=True)
+
+    # Point-in-time merge: for each date, get the most recent fundamentals
+    # where the reporting/availability date is on or before the price date
+    merged = pd.merge_asof(
+        price_df,
+        fundamentals_df,
+        left_on='date',
+        right_on=merge_col,
+        by='ticker',
+        direction='backward',
+        suffixes=('', '_fundamental')
+    )
+
+    # Restore ticker+date sort order
+    merged = merged.sort_values(['ticker', 'date']).reset_index(drop=True)
+
+    coverage = merged[merge_col].notna().sum() / len(merged) * 100
+    print(f"Merged fundamentals (point-in-time): {len(merged)} rows, {coverage:.1f}% coverage")
+
     return merged
 
 if __name__ == "__main__":
