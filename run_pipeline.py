@@ -22,6 +22,8 @@ from src.data_fetch.build_daily_dataset import load_ohlcv_data, load_news_data, 
 from src.embeddings.embed_news import embed_news
 from src.utils.add_trading_metrics import add_trading_metrics
 from src.modeling.add_cross_sectional_features import add_all_cross_sectional_features
+from src.features.build_gkx_characteristics import build_and_attach_gkx
+from src.constants import validate_gkx_schema
 
 def run_full_pipeline(
     n_equities: int = 1000,
@@ -39,13 +41,13 @@ def run_full_pipeline(
         end_date: End date for historical data
         steps: List of steps to run (None = run all)
                Options: ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
-                        'features', 'merge', 'cross_sectional']
+                        'features', 'merge', 'gkx_features', 'cross_sectional']
         data_tag: Unique tag for this run (default: auto-generated timestamp)
     """
 
     if steps is None:
         steps = ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
-                'features', 'merge', 'cross_sectional']
+                'features', 'merge', 'gkx_features', 'cross_sectional']
 
     if data_tag is None:
         data_tag = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -107,21 +109,20 @@ def run_full_pipeline(
         print("\n" + "="*80)
         print("STEP 3: Fetching Quarterly Fundamental Data (Point-in-Time)")
         print("="*80)
-        print("Using 45-day reporting lag to prevent look-ahead bias")
+        print("Using actual SEC filing dates from EDGAR (no estimated lag)")
 
         # Fetch quarterly fundamentals
         fundamentals_df = fetch_all_quarterly_fundamentals(
             tickers=tickers,
             save_dir=f"{raw_dir}/fundamentals_quarterly/",
-            reporting_lag_days=45  # Standard 10-Q filing deadline
         )
 
         # Fetch sector/industry info (doesn't change much, can use current)
         print("\nFetching sector/industry classifications...")
         valuation_data = []
-        for i, ticker in enumerate(tickers[:100]):  # Limit to avoid rate limits, can fetch more later
-            if (i + 1) % 20 == 0:
-                print(f"  Progress: {i + 1}/100")
+        for i, ticker in enumerate(tickers):
+            if (i + 1) % 50 == 0:
+                print(f"  Progress: {i + 1}/{len(tickers)}")
             val = fetch_current_valuation_metrics(ticker)
             if val:
                 valuation_data.append(val)
@@ -263,11 +264,35 @@ def run_full_pipeline(
             return None
 
     # ================================================================================
-    # STEP 9: Add Cross-Sectional Features for Modeling
+    # STEP 9: Add GKX Features (Monthly proxies attached to daily panel)
+    # ================================================================================
+    if 'gkx_features' in steps:
+        print("\n" + "="*80)
+        print("STEP 9: Building GKX-94 Proxy Characteristics")
+        print("="*80)
+        merged_df, gkx_monthly_df, coverage_df = build_and_attach_gkx(merged_df)
+        gkx_monthly_path = f"{processed_dir}/gkx_monthly.parquet"
+        coverage_csv = f"{processed_dir}/gkx_coverage_report.csv"
+        coverage_json = f"{processed_dir}/gkx_coverage_report.json"
+        gkx_daily_path = f"{processed_dir}/final_dataset_with_gkx.parquet"
+        gkx_monthly_df.to_parquet(gkx_monthly_path, index=False)
+        coverage_df.to_csv(coverage_csv, index=False)
+        coverage_df.to_json(coverage_json, orient="records", indent=2)
+        merged_df.to_parquet(gkx_daily_path, index=False)
+        schema = validate_gkx_schema(merged_df.columns.tolist())
+        print(f"GKX schema: {len(schema['present'])}/{len(schema['required'])} present")
+        if schema["missing"]:
+            print(f"Warning: Missing GKX columns (still expected as NaN fallback in some cases): {schema['missing']}")
+        print(f"Saved GKX monthly characteristics: {gkx_monthly_path}")
+        print(f"Saved coverage report: {coverage_csv}")
+        print(f"Saved GKX-attached daily dataset: {gkx_daily_path}")
+
+    # ================================================================================
+    # STEP 10: Add Cross-Sectional Features for Modeling
     # ================================================================================
     if 'cross_sectional' in steps:
         print("\n" + "="*80)
-        print("STEP 9: Adding Cross-Sectional Features for Modeling")
+        print("STEP 10: Adding Cross-Sectional Features for Modeling")
         print("="*80)
 
         # Add cross-sectional features (no target creation — use target_builder separately)

@@ -6,6 +6,7 @@ Transforms raw features into relative metrics that are comparable across stocks 
 import pandas as pd
 import numpy as np
 from typing import List, Optional
+from src.features.gkx_registry import get_gkx_feature_names
 
 
 def add_percentile_ranks(df: pd.DataFrame,
@@ -307,30 +308,17 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
     # Ensure sorted by ticker and date
     df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
 
-    # Define features to transform
-    # These are common features that should exist after the pipeline
-    price_features = ['open', 'high', 'low', 'close', 'volume']
-
-    technical_features = [
-        'momentum_20d', 'momentum_60d', 'momentum_120d',
-        'volatility_20d', 'volatility_60d',
-        'rsi_14d', 'max_drawdown_60d'
-    ]
-
-    fundamental_features = [
-       'market_cap', 'enterprise_value', 'trailing_pe',
-       'forward_pe', 'peg_ratio', 'price_to_book', 'price_to_sales',
-       'enterprise_to_revenue', 'enterprise_to_ebitda', 'profit_margin',
-       'operating_margin', 'gross_margin', 'roe', 'roa', 'revenue_growth',
-       'earnings_growth', 'total_cash', 'total_debt', 'debt_to_equity',
-       'current_ratio', 'quick_ratio', 'book_value', 'revenue_per_share',
-       'earnings_per_share', 'dividend_rate', 'dividend_yield', 'payout_ratio',
-       'beta', 'shares_outstanding', 'float_shares', 'held_percent_insiders',
-       'held_percent_institutions',
+    # Registry-driven GKX base features plus optional controls for backward compatibility.
+    gkx_features = get_gkx_feature_names()
+    optional_controls = [
+        'open', 'high', 'low', 'close', 'volume',
+        'profit_margin', 'operating_margin', 'gross_margin',
+        'roe', 'roa', 'total_cash', 'total_debt',
+        'debt_to_equity', 'current_ratio', 'quick_ratio'
     ]
 
     # Filter to only features that exist in the DataFrame
-    all_features = price_features + technical_features + fundamental_features
+    all_features = gkx_features + optional_controls
     existing_features = [f for f in all_features if f in df.columns]
 
     if not existing_features:
@@ -360,7 +348,7 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
 
     # 4. Add quintile buckets for key features
     print("  - Adding quintile buckets...")
-    key_features = [f for f in ['momentum_60d', 'rsi_14d', 'pe_ratio', 'roe'] if f in df.columns]
+    key_features = [f for f in ['mom12m', 'mom6m', 'bm', 'ep', 'roeq', 'roaq', 'operprof'] if f in df.columns]
     if key_features:
         df = add_quintile_buckets(df, key_features)
 

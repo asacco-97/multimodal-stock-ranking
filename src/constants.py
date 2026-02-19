@@ -77,7 +77,7 @@ DATA_DICTIONARY = {
     # Fundamental - Quarterly Metadata (Point-in-Time)
     # ------------------------------------------------------------------------
     'quarter_end_date': 'Last day of the fiscal quarter for the fundamentals being used',
-    'report_date': 'Date when quarterly fundamentals became available (quarter_end + reporting lag)',
+    'report_date': 'Date when quarterly fundamentals were filed with the SEC (actual filing date from EDGAR)',
 
     # ------------------------------------------------------------------------
     # Fundamental - Valuation Ratios
@@ -249,6 +249,53 @@ DATA_DICTIONARY = {
     # Pattern: {feature}_rank_change_Xd = Change in rank over X days
 }
 
+# ----------------------------------------------------------------------------
+# GKX Canonical Characteristics (94)
+# ----------------------------------------------------------------------------
+GKX_ALIASES = {
+    'absacc': 'Absolute accruals', 'acc': 'Accruals', 'aeavol': 'Abnormal announcement volume proxy',
+    'age': 'Age', 'agr': 'Asset growth', 'baspread': 'Bid-ask spread proxy', 'beta': 'Beta',
+    'betasq': 'Beta squared', 'bm': 'Book-to-market', 'bm_ia': 'Industry-adjusted book-to-market',
+    'cash': 'Cash-to-assets', 'cashdebt': 'Cash-to-debt', 'cashpr': 'Cash productivity proxy',
+    'cfp': 'Cashflow-to-price', 'cfp_ia': 'Industry-adjusted cashflow-to-price',
+    'chatoia': 'Change in asset turnover IA proxy', 'chcsho': 'Change in shares outstanding',
+    'chempia': 'Change in employee productivity IA proxy', 'chinv': 'Change in inventory',
+    'chmom': 'Change in momentum', 'chpmia': 'Change in profit margin IA proxy',
+    'chtx': 'Change in tax expense', 'cinvest': 'Corporate investment proxy',
+    'convind': 'Convertible debt indicator proxy', 'currat': 'Current ratio', 'depr': 'Depreciation ratio',
+    'divi': 'Dividend initiation indicator proxy', 'divo': 'Dividend omission indicator proxy',
+    'dolvol': 'Dollar volume', 'dy': 'Dividend yield', 'ear': 'Earnings announcement return proxy',
+    'egr': 'Earnings growth', 'ep': 'Earnings-to-price', 'gma': 'Gross profitability',
+    'grCAPX': 'Capex growth', 'grltnoa': 'Growth in long-term net operating assets proxy',
+    'herf': 'Industry concentration', 'hire': 'Hiring proxy', 'idiovol': 'Idiosyncratic volatility proxy',
+    'ill': 'Illiquidity proxy', 'indmom': 'Industry momentum', 'invest': 'Investment',
+    'lev': 'Leverage', 'lgr': 'Liability growth', 'maxret': 'Maximum return',
+    'mom12m': '12-month momentum', 'mom1m': '1-month momentum', 'mom36m': '36-month momentum',
+    'mom6m': '6-month momentum', 'ms': 'Share issuance proxy', 'mvel1': 'Log market equity',
+    'mve_ia': 'Industry-adjusted log market equity', 'nincr': 'Earnings increase streak proxy',
+    'operprof': 'Operating profitability', 'orgcap': 'Organizational capital proxy',
+    'pchcapx_ia': 'Industry-adjusted capex change', 'pchcurrat': 'Change in current ratio',
+    'pchdepr': 'Change in depreciation ratio', 'pchgm_pchsale': 'Change gross margin minus change sales',
+    'pchquick': 'Change in quick ratio', 'pchsale_pchinvt': 'Change sales minus change inventory',
+    'pchsale_pchrect': 'Change sales minus change receivables',
+    'pchsale_pchxsga': 'Change sales minus change SG&A', 'pchsaleinv': 'Change sales-to-inventory',
+    'pctacc': 'Percent accruals', 'pricedelay': 'Price delay proxy', 'ps': 'Price-to-sales',
+    'quick': 'Quick ratio', 'rd': 'R&D intensity proxy', 'rd_mve': 'R&D-to-market-equity',
+    'rd_sale': 'R&D-to-sales', 'realestate': 'Real estate intensity proxy', 'retvol': 'Return volatility',
+    'roaq': 'Return on assets (quarterly proxy)', 'roavol': 'ROA volatility proxy',
+    'roeq': 'Return on equity (quarterly proxy)', 'roic': 'Return on invested capital proxy',
+    'rsup': 'Revenue surprise proxy', 'salecash': 'Sales-to-cash', 'saleinv': 'Sales-to-inventory',
+    'salerec': 'Sales-to-receivables', 'secured': 'Secured debt ratio proxy',
+    'securedind': 'Secured debt indicator proxy', 'sgr': 'Sales growth', 'sin': 'Sin stock indicator proxy',
+    'sp': 'Sales-to-price', 'std_dolvol': 'Dollar volume volatility', 'std_turn': 'Turnover volatility',
+    'stdacc': 'Accrual volatility proxy', 'stdcf': 'Cashflow volatility proxy',
+    'tang': 'Tangibility', 'tb': 'Tax burden proxy', 'turn': 'Turnover', 'zerotrade': 'Zero-trade fraction'
+}
+
+for _k, _v in GKX_ALIASES.items():
+    if _k not in DATA_DICTIONARY:
+        DATA_DICTIONARY[_k] = f"GKX proxy characteristic: {_v}"
+
 
 # ============================================================================
 # FEATURE CATEGORIES
@@ -343,7 +390,9 @@ FEATURE_CATEGORIES = {
 
     'macro_money_credit': [
         'M2SL', 'TOTALSL'
-    ]
+    ],
+
+    'gkx_characteristics': sorted(list(GKX_ALIASES.keys()))
 }
 
 
@@ -445,6 +494,23 @@ def get_variables_by_category(category: str) -> list:
         List of variable names in that category
     """
     return FEATURE_CATEGORIES.get(category, [])
+
+
+def validate_gkx_schema(columns: list) -> dict:
+    """
+    Validate that all 94 GKX canonical columns are present.
+
+    Args:
+        columns: List of dataset columns
+
+    Returns:
+        Dict with keys: required, present, missing
+    """
+    required = sorted(GKX_ALIASES.keys())
+    colset = set(columns)
+    present = [c for c in required if c in colset]
+    missing = [c for c in required if c not in colset]
+    return {"required": required, "present": present, "missing": missing}
 
 
 def print_data_dictionary(categories: list = None):
