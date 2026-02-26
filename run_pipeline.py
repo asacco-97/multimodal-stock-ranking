@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 import pandas as pd
 import json
-from typing import Optional
+from typing import Optional, List
 
 # Import data fetching modules
 from src.data_fetch.get_universe import get_top_n_equities_by_liquidity, load_universe
@@ -30,7 +30,9 @@ def run_full_pipeline(
     start_date: str = "1995-01-01",
     end_date: str = "2026-02-09",
     steps: Optional[list] = None,
-    data_tag: Optional[str] = None
+    data_tag: Optional[str] = None,
+    exclude_etfs: bool = False,
+    benchmark_tickers: Optional[List[str]] = None,
 ):
     """
     Run the complete data pipeline for medium-term equity forecasting.
@@ -43,6 +45,9 @@ def run_full_pipeline(
                Options: ['universe', 'ohlcv', 'fundamentals', 'macro', 'news', 'embed',
                         'features', 'merge', 'gkx_features', 'cross_sectional']
         data_tag: Unique tag for this run (default: auto-generated timestamp)
+        exclude_etfs: If True, build universe from non-ETF equities only.
+        benchmark_tickers: Optional tickers to force-include in the universe
+                           (e.g., SPY/QQQ/IWM) for comparison benchmarks.
     """
 
     if steps is None:
@@ -64,6 +69,9 @@ def run_full_pipeline(
     print(f"Data Tag: {data_tag}")
     print(f"Raw Dir: {raw_dir}")
     print(f"Processed Dir: {processed_dir}")
+    print(f"Exclude ETFs: {exclude_etfs}")
+    if benchmark_tickers:
+        print(f"Forced Benchmark Tickers: {', '.join(benchmark_tickers)}")
     print(f"Steps: {', '.join(steps)}")
     print(f"{'='*80}\n")
 
@@ -75,12 +83,23 @@ def run_full_pipeline(
         print("STEP 1: Building Universe")
         print("="*80)
 
-        universe_df = get_top_n_equities_by_liquidity(n=n_equities)
+        universe_df = get_top_n_equities_by_liquidity(
+            n=n_equities,
+            exclude_etfs=exclude_etfs,
+            force_include_tickers=benchmark_tickers,
+        )
         tickers = universe_df['ticker'].tolist()
 
     else:
         print("\nSkipping universe creation - loading existing universe...")
-        tickers = load_universe("data/universe/top_1000_tickers.json")
+        default_path = (
+            f"data/universe/top_{n_equities}_tickers_non_etf.json"
+            if exclude_etfs
+            else f"data/universe/top_{n_equities}_tickers.json"
+        )
+        if not os.path.exists(default_path):
+            default_path = "data/universe/top_1000_tickers.json"
+        tickers = load_universe(default_path)
 
     print(f"\nUniverse contains {len(tickers)} tickers")
 
@@ -342,6 +361,13 @@ if __name__ == "__main__":
     parser.add_argument("--end_date", type=str, default="2025-02-09", help="End date (YYYY-MM-DD)")
     parser.add_argument("--steps", type=str, help="Comma-separated steps to run (default: all)")
     parser.add_argument("--data_tag", type=str, default=None, help="Unique tag for this run (default: auto-generated timestamp)")
+    parser.add_argument("--exclude_etfs", action="store_true", help="Exclude ETFs from ranked universe")
+    parser.add_argument(
+        "--benchmark_tickers",
+        type=str,
+        default="SPY,QQQ,IWM",
+        help="Comma-separated tickers to force-include in universe for benchmarks",
+    )
 
     args = parser.parse_args()
 
@@ -351,11 +377,19 @@ if __name__ == "__main__":
     else:
         steps = None  # Run all
 
+    benchmark_tickers = [
+        t.strip().upper().replace(".", "-")
+        for t in (args.benchmark_tickers or "").split(",")
+        if t.strip()
+    ]
+
     # Run pipeline
     final_df = run_full_pipeline(
         n_equities=args.n_equities,
         start_date=args.start_date,
         end_date=args.end_date,
         steps=steps,
-        data_tag=args.data_tag
+        data_tag=args.data_tag,
+        exclude_etfs=args.exclude_etfs,
+        benchmark_tickers=benchmark_tickers,
     )

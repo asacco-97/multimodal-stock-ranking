@@ -3,16 +3,38 @@
 Module to add cross-sectional features for stock ranking models.
 Transforms raw features into relative metrics that are comparable across stocks and time periods.
 """
+import gc
 import pandas as pd
 import numpy as np
 from typing import List, Optional
 from src.features.gkx_registry import get_gkx_feature_names
 
 
+def _as_float32(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").astype(np.float32)
+
+
+def _work_df(df: pd.DataFrame, inplace: bool) -> pd.DataFrame:
+    return df if inplace else df.copy()
+
+
+def optimize_numeric_memory(df: pd.DataFrame, exclude: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Downcast wide numeric panels to reduce RAM pressure.
+    """
+    exclude = set(exclude or [])
+    out = df
+    float64_cols = [c for c in out.select_dtypes(include=["float64"]).columns if c not in exclude]
+    for c in float64_cols:
+        out[c] = out[c].astype(np.float32)
+    return out
+
+
 def add_percentile_ranks(df: pd.DataFrame,
                          features: List[str],
                          groupby_col: str = 'date',
-                         suffix: str = '_rank') -> pd.DataFrame:
+                         suffix: str = '_rank',
+                         inplace: bool = False) -> pd.DataFrame:
     """
     Add percentile rank features for each feature within each time period.
 
@@ -25,15 +47,18 @@ def add_percentile_ranks(df: pd.DataFrame,
     Returns:
         DataFrame with added rank columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
+    grouped = df_copy.groupby(groupby_col, sort=False)
 
     for feature in features:
         if feature not in df_copy.columns:
             print(f"Warning: {feature} not in DataFrame, skipping...")
             continue
+        if not pd.api.types.is_numeric_dtype(df_copy[feature]):
+            continue
 
         rank_col = f"{feature}{suffix}"
-        df_copy[rank_col] = df_copy.groupby(groupby_col)[feature].rank(pct=True, method='average')
+        df_copy[rank_col] = _as_float32(grouped[feature].rank(pct=True, method='average'))
 
     return df_copy
 
@@ -41,7 +66,8 @@ def add_percentile_ranks(df: pd.DataFrame,
 def add_z_scores(df: pd.DataFrame,
                  features: List[str],
                  groupby_col: str = 'date',
-                 suffix: str = '_zscore') -> pd.DataFrame:
+                 suffix: str = '_zscore',
+                 inplace: bool = False) -> pd.DataFrame:
     """
     Add z-score normalized features within each time period.
 
@@ -54,17 +80,21 @@ def add_z_scores(df: pd.DataFrame,
     Returns:
         DataFrame with added z-score columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
+    grouped = df_copy.groupby(groupby_col, sort=False)
 
     for feature in features:
         if feature not in df_copy.columns:
             print(f"Warning: {feature} not in DataFrame, skipping...")
             continue
+        if not pd.api.types.is_numeric_dtype(df_copy[feature]):
+            continue
 
         zscore_col = f"{feature}{suffix}"
-        df_copy[zscore_col] = df_copy.groupby(groupby_col)[feature].transform(
-            lambda x: (x - x.mean()) / (x.std() + 1e-8)  # Add small epsilon to avoid division by zero
-        )
+        mean = grouped[feature].transform("mean")
+        std = grouped[feature].transform("std")
+        z = (df_copy[feature] - mean) / (std + 1e-8)
+        df_copy[zscore_col] = _as_float32(z)
 
     return df_copy
 
@@ -73,7 +103,8 @@ def add_sector_relative_features(df: pd.DataFrame,
                                   features: List[str],
                                   sector_col: str = 'sector',
                                   groupby_col: str = 'date',
-                                  suffix: str = '_sector_rel') -> pd.DataFrame:
+                                  suffix: str = '_sector_rel',
+                                  inplace: bool = False) -> pd.DataFrame:
     """
     Add sector-relative features (value minus sector mean).
 
@@ -87,7 +118,7 @@ def add_sector_relative_features(df: pd.DataFrame,
     Returns:
         DataFrame with added sector-relative columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
 
     if sector_col not in df_copy.columns:
         print(f"Warning: {sector_col} not in DataFrame, skipping sector-relative features...")
@@ -97,11 +128,13 @@ def add_sector_relative_features(df: pd.DataFrame,
         if feature not in df_copy.columns:
             print(f"Warning: {feature} not in DataFrame, skipping...")
             continue
+        if not pd.api.types.is_numeric_dtype(df_copy[feature]):
+            continue
 
         rel_col = f"{feature}{suffix}"
         # Calculate sector mean for each date
         sector_mean = df_copy.groupby([groupby_col, sector_col])[feature].transform('mean')
-        df_copy[rel_col] = df_copy[feature] - sector_mean
+        df_copy[rel_col] = _as_float32(df_copy[feature] - sector_mean)
 
     return df_copy
 
@@ -110,7 +143,8 @@ def add_sector_ranks(df: pd.DataFrame,
                      features: List[str],
                      sector_col: str = 'sector',
                      groupby_col: str = 'date',
-                     suffix: str = '_sector_rank') -> pd.DataFrame:
+                     suffix: str = '_sector_rank',
+                     inplace: bool = False) -> pd.DataFrame:
     """
     Add within-sector percentile ranks.
 
@@ -124,7 +158,7 @@ def add_sector_ranks(df: pd.DataFrame,
     Returns:
         DataFrame with added sector rank columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
 
     if sector_col not in df_copy.columns:
         print(f"Warning: {sector_col} not in DataFrame, skipping sector ranks...")
@@ -134,11 +168,13 @@ def add_sector_ranks(df: pd.DataFrame,
         if feature not in df_copy.columns:
             print(f"Warning: {feature} not in DataFrame, skipping...")
             continue
+        if not pd.api.types.is_numeric_dtype(df_copy[feature]):
+            continue
 
         rank_col = f"{feature}{suffix}"
-        df_copy[rank_col] = df_copy.groupby([groupby_col, sector_col])[feature].rank(
+        df_copy[rank_col] = _as_float32(df_copy.groupby([groupby_col, sector_col], sort=False)[feature].rank(
             pct=True, method='average'
-        )
+        ))
 
     return df_copy
 
@@ -147,7 +183,9 @@ def add_quintile_buckets(df: pd.DataFrame,
                          features: List[str],
                          groupby_col: str = 'date',
                          n_buckets: int = 5,
-                         suffix: str = '_quintile') -> pd.DataFrame:
+                         suffix: str = '_quintile',
+                         rank_suffix: str = '_rank',
+                         inplace: bool = False) -> pd.DataFrame:
     """
     Add quintile/decile buckets for features.
 
@@ -161,17 +199,28 @@ def add_quintile_buckets(df: pd.DataFrame,
     Returns:
         DataFrame with added bucket columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
 
     for feature in features:
         if feature not in df_copy.columns:
             print(f"Warning: {feature} not in DataFrame, skipping...")
             continue
+        if not pd.api.types.is_numeric_dtype(df_copy[feature]):
+            continue
 
         bucket_col = f"{feature}{suffix}"
-        df_copy[bucket_col] = df_copy.groupby(groupby_col)[feature].transform(
-            lambda x: pd.qcut(x, q=n_buckets, labels=False, duplicates='drop')
-        )
+        rank_col = f"{feature}{rank_suffix}"
+
+        if rank_col in df_copy.columns:
+            # Prefer precomputed percentile ranks to avoid expensive qcut/groupby transforms.
+            pct = pd.to_numeric(df_copy[rank_col], errors="coerce")
+        else:
+            pct = df_copy.groupby(groupby_col, sort=False)[feature].rank(pct=True, method='average')
+
+        # Convert percentile rank [0,1] into integer buckets [0, n_buckets-1].
+        bucket = np.floor((pct - 1e-12) * n_buckets).clip(0, n_buckets - 1)
+        bucket = bucket.where(pct.notna(), np.nan)
+        df_copy[bucket_col] = bucket.astype(np.float32)
 
     return df_copy
 
@@ -179,7 +228,9 @@ def add_quintile_buckets(df: pd.DataFrame,
 def add_rank_changes(df: pd.DataFrame,
                      rank_features: List[str],
                      periods: List[int] = [1, 5, 20],
-                     suffix: str = '_rank_change') -> pd.DataFrame:
+                     suffix: str = '_rank_change',
+                     inplace: bool = False,
+                     assume_sorted: bool = False) -> pd.DataFrame:
     """
     Add changes in rank over time (rank momentum).
 
@@ -192,10 +243,11 @@ def add_rank_changes(df: pd.DataFrame,
     Returns:
         DataFrame with added rank change columns
     """
-    df_copy = df.copy()
+    df_copy = _work_df(df, inplace)
 
     # Ensure sorted
-    df_copy = df_copy.sort_values(['ticker', 'date']).reset_index(drop=True)
+    if not assume_sorted:
+        df_copy = df_copy.sort_values(['ticker', 'date']).reset_index(drop=True)
 
     for rank_feature in rank_features:
         if rank_feature not in df_copy.columns:
@@ -204,7 +256,7 @@ def add_rank_changes(df: pd.DataFrame,
 
         for period in periods:
             change_col = f"{rank_feature}{suffix}_{period}d"
-            df_copy[change_col] = df_copy.groupby('ticker')[rank_feature].diff(periods=period)
+            df_copy[change_col] = _as_float32(df_copy.groupby('ticker', sort=False)[rank_feature].diff(periods=period))
 
     return df_copy
 
@@ -307,6 +359,7 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
 
     # Ensure sorted by ticker and date
     df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
+    df = optimize_numeric_memory(df, exclude=["date"])
 
     # Registry-driven GKX base features plus optional controls for backward compatibility.
     gkx_features = get_gkx_feature_names()
@@ -319,7 +372,10 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
 
     # Filter to only features that exist in the DataFrame
     all_features = gkx_features + optional_controls
-    existing_features = [f for f in all_features if f in df.columns]
+    existing_features = [
+        f for f in all_features
+        if f in df.columns and pd.api.types.is_numeric_dtype(df[f])
+    ]
 
     if not existing_features:
         print("Warning: No standard features found in DataFrame!")
@@ -330,33 +386,42 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
 
     # 1. Add percentile ranks
     print("  - Adding percentile ranks...")
-    df = add_percentile_ranks(df, existing_features)
+    df = add_percentile_ranks(df, existing_features, inplace=True)
+    gc.collect()
 
-    # 2. Add z-scores
-    print("  - Adding z-scores...")
-    df = add_z_scores(df, existing_features)
-
-    # 3. Add sector-relative features (if sector column exists)
-    if sector_col and sector_col in df.columns:
-        print("  - Adding sector-relative features...")
-        df = add_sector_relative_features(df, existing_features, sector_col=sector_col)
-
-        print("  - Adding sector ranks...")
-        df = add_sector_ranks(df, existing_features, sector_col=sector_col)
-    else:
-        print(f"  - Skipping sector features ('{sector_col}' column not found)")
-
-    # 4. Add quintile buckets for key features
+    # 2. Add quintile buckets for key features (from rank columns to reduce memory).
     print("  - Adding quintile buckets...")
     key_features = [f for f in ['mom12m', 'mom6m', 'bm', 'ep', 'roeq', 'roaq', 'operprof'] if f in df.columns]
     if key_features:
-        df = add_quintile_buckets(df, key_features)
+        df = add_quintile_buckets(df, key_features, inplace=True)
+    gc.collect()
+
+    # 3. Add z-scores
+    print("  - Adding z-scores...")
+    df = add_z_scores(df, existing_features, inplace=True)
+    gc.collect()
+
+    # 4. Add sector-relative features (if sector column exists)
+    if sector_col and sector_col in df.columns:
+        print("  - Adding sector-relative features...")
+        df = add_sector_relative_features(df, existing_features, sector_col=sector_col, inplace=True)
+
+        print("  - Adding sector ranks...")
+        df = add_sector_ranks(df, existing_features, sector_col=sector_col, inplace=True)
+    else:
+        print(f"  - Skipping sector features ('{sector_col}' column not found)")
+    gc.collect()
 
     # 5. Add rank momentum (changes in ranks over time)
     print("  - Adding rank momentum...")
-    rank_features = [f"{feat}_rank" for feat in existing_features if f"{feat}_rank" in df.columns]
+    rank_momentum_base = [
+        f for f in ["mom12m", "mom6m", "bm", "ep", "roeq"]
+        if f in existing_features
+    ]
+    rank_features = [f"{feat}_rank" for feat in rank_momentum_base if f"{feat}_rank" in df.columns]
     if rank_features:
-        df = add_rank_changes(df, rank_features) # Limit to 5 features to avoid too many columns
+        df = add_rank_changes(df, rank_features, inplace=True, assume_sorted=True)
+    gc.collect()
 
     print(f"Added cross-sectional features. New shape: {df.shape}")
     print(f"  Total features: {len([c for c in df.columns if c not in ['ticker', 'date']])}")

@@ -24,7 +24,7 @@ SEC_USER_AGENT = "AnthonySacco amsacco97@gmail.com"
 
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_RATE_LIMIT_DELAY = 0.11  # 10 req/s max -> ~100ms between requests
+SEC_RATE_LIMIT_DELAY = 0.2  # 10 req/s max -> ~200ms between requests
 
 # XBRL tag mapping: internal field name -> ordered list of us-gaap tags to try
 # First match wins. Companies use different tags for the same concept.
@@ -75,7 +75,7 @@ XBRL_TAG_MAP = {
         'ResearchAndDevelopmentExpense',
     ],
     'employees': [
-        'EntityCommonStockSharesOutstanding',  # placeholder fallback for sparse employee tags
+        'EntityNumberOfEmployees',
     ],
     # Balance sheet (instant)
     'total_assets': [
@@ -122,6 +122,9 @@ XBRL_TAG_MAP = {
     ],
     'real_estate_assets': [
         'RealEstateNet',
+        'RealEstateInvestmentPropertyNet',
+        'RealEstateGrossAtCarryingValue',
+        'RealEstateInvestments',
     ],
     'secured_debt': [
         'DebtInstrumentCollateralAmount',
@@ -140,12 +143,12 @@ INSTANT_FIELDS = {
     'total_assets', 'total_equity', 'long_term_debt', 'short_term_debt',
     'total_cash', 'current_assets', 'current_liabilities', 'inventory',
     'shares_outstanding', 'receivables', 'ppe', 'real_estate_assets',
-    'secured_debt', 'convertible_debt', 'taxes_payable',
+    'secured_debt', 'convertible_debt', 'taxes_payable', 'employees',
 }
 DURATION_FIELDS = {
     'revenue', 'net_income', 'operating_income', 'gross_profit',
     'income_tax', 'interest_expense', 'depreciation', 'operating_cash_flow',
-    'capex', 'sga_expense', 'research_and_development', 'employees',
+    'capex', 'sga_expense', 'research_and_development',
 }
 
 # ---------------------------------------------------------------------------
@@ -239,17 +242,30 @@ def _extract_fact_series(
     form_filter: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Extract a time series from EDGAR company facts for the first matching XBRL tag.
+    Extract a time series from EDGAR company facts by unioning ALL matching XBRL tags.
+
+    Companies switch tags over time (e.g., SalesRevenueNet -> RevenueFromContract
+    after ASC 606 adoption). Picking only one tag loses data. Instead, we union
+    entries from all matching tags and deduplicate by (end, start) keeping the
+    latest filing.
 
     Returns DataFrame with columns: [val, end, start, filed, form, fp, fy, accn]
     """
-    us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+    facts = facts_data.get('facts', {})
+    namespaces = [facts.get('us-gaap', {}), facts.get('dei', {})]
+
+    all_dfs = []
 
     for tag in xbrl_tags:
-        if tag not in us_gaap:
+        tag_obj = None
+        for namespace in namespaces:
+            if tag in namespace:
+                tag_obj = namespace[tag]
+                break
+        if tag_obj is None:
             continue
 
-        units = us_gaap[tag].get('units', {})
+        units = tag_obj.get('units', {})
         entries = units.get(unit) or units.get('shares') or units.get('USD/shares')
         if not entries:
             continue
@@ -271,9 +287,23 @@ def _extract_fact_series(
         if 'start' in df.columns:
             df['start'] = pd.to_datetime(df['start'], errors='coerce')
 
-        return df
+        df['_tag'] = tag
+        all_dfs.append(df)
 
-    return pd.DataFrame()
+    if not all_dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+
+    # Deduplicate: for the same (end, start) period, keep the latest filing.
+    # This handles both tag-switching and amended filings.
+    dedup_cols = ['end']
+    if 'start' in combined.columns:
+        dedup_cols.append('start')
+    combined = combined.sort_values('filed').drop_duplicates(subset=dedup_cols, keep='last')
+    combined = combined.drop(columns=['_tag'], errors='ignore')
+
+    return combined
 
 
 def _safe_div(numerator, denominator):
@@ -298,7 +328,7 @@ def _extract_quarterly_instant(
 
     Returns DataFrame with columns: [quarter_end, value, filed]
     """
-    unit = 'shares' if field_name in {'shares_outstanding'} else 'USD'
+    unit = 'shares' if field_name in {'shares_outstanding'} else ('pure' if field_name in {'employees'} else 'USD')
     tags = XBRL_TAG_MAP.get(field_name, [])
     raw = _extract_fact_series(
         facts_data, tags, unit=unit,
@@ -323,16 +353,17 @@ def _extract_quarterly_duration(
     facts_data: dict, field_name: str
 ) -> pd.DataFrame:
     """
-    Extract quarterly income statement values (single-quarter duration).
+    Extract quarterly income statement / cash-flow values (single-quarter duration).
 
     Handles:
     - Single-quarter entries from 10-Q (~90-day duration)
-    - Cumulative entries that need differencing
-    - Q4 derivation from 10-K annual - sum(Q1+Q2+Q3)
+    - Gap-filling from cumulative YTD entries via differencing
+      (cash-flow statements in 10-Q typically report YTD, not single-quarter)
+    - Q4 derivation from 10-K annual minus sum(Q1+Q2+Q3)
 
     Returns DataFrame with columns: [quarter_end, value, filed]
     """
-    unit = 'shares' if field_name in {'employees'} else 'USD'
+    unit = 'USD'
     tags = XBRL_TAG_MAP.get(field_name, [])
     raw = _extract_fact_series(
         facts_data, tags, unit=unit,
@@ -341,88 +372,100 @@ def _extract_quarterly_duration(
     if raw.empty:
         return pd.DataFrame(columns=['quarter_end', 'value', 'filed'])
 
-    # Deduplicate: keep the latest filing per (end, form) pair
-    raw = raw.sort_values('filed').drop_duplicates(subset=['end', 'form'], keep='last')
-
     results = {}  # quarter_end -> (value, filed)
 
-    # --- Step 1: Extract single-quarter values from 10-Q ---
-    # These have 'start' dates and duration ~60-120 days
     if 'start' in raw.columns:
-        q_data = raw[raw['form'].isin(['10-Q', '10-Q/A'])].copy()
-        if not q_data.empty and q_data['start'].notna().any():
-            q_data = q_data.dropna(subset=['start', 'end'])
+        q_data = raw.dropna(subset=['start', 'end']).copy()
+        if not q_data.empty:
             q_data['duration_days'] = (q_data['end'] - q_data['start']).dt.days
 
-            # Single-quarter entries: ~60-120 days
-            single_q = q_data[(q_data['duration_days'] >= 60) & (q_data['duration_days'] <= 120)]
+            # --- Step 1: Single-quarter entries (60-120 days) ---
+            single_q = q_data[(q_data['duration_days'] >= 60) & (q_data['duration_days'] <= 120)].copy()
+            single_q = single_q.sort_values('filed').drop_duplicates(subset=['end'], keep='last')
+            for _, row in single_q.iterrows():
+                results[row['end']] = (row['val'], row['filed'])
 
-            if not single_q.empty:
-                for _, row in single_q.iterrows():
-                    results[row['end']] = (row['val'], row['filed'])
-            else:
-                # Cumulative entries: need to difference them
-                # Sort by end date and compute sequential differences within each fiscal year
-                cumulative = q_data.sort_values('end')
-                prev_val = None
-                prev_fy = None
-                for _, row in cumulative.iterrows():
-                    fy = row.get('fy')
-                    if fy != prev_fy:
-                        # First quarter of a new fiscal year - this IS the single-quarter value
-                        results[row['end']] = (row['val'], row['filed'])
-                    elif prev_val is not None:
-                        # Subsequent quarter - subtract previous cumulative
-                        q_val = row['val'] - prev_val
-                        results[row['end']] = (q_val, row['filed'])
-                    prev_val = row['val']
-                    prev_fy = fy
+            # --- Step 2: Fill gaps from cumulative YTD entries ---
+            # Cash-flow statements often only have YTD cumulative in 10-Qs.
+            # E.g., Q1=90d (single), Q2=181d (cumulative), Q3=273d (cumulative).
+            # Derive single-quarter values by differencing consecutive cumulative values.
+            #
+            # IMPORTANT: Group by fiscal-year start date, NOT by EDGAR's `fy` field.
+            # EDGAR tags comparative/restated data from prior years with the current
+            # filing's `fy`, so grouping by `fy` mixes fiscal years and produces
+            # incorrect differences.
+            cumulative = q_data[(q_data['duration_days'] > 120) & (q_data['duration_days'] < 400)].copy()
+            if not cumulative.empty:
+                cumulative = cumulative.sort_values(['end', 'filed']).drop_duplicates(subset=['end'], keep='last')
+                cumulative = cumulative.sort_values('end')
 
-    # --- Step 2: Derive Q4 from 10-K annual values ---
-    annual = raw[raw['form'].isin(['10-K', '10-K/A'])].copy()
-    if not annual.empty and 'fp' in annual.columns:
+                # Group by fiscal year START date (correctly separates fiscal years)
+                for fy_start in cumulative['start'].dropna().unique():
+                    fy_cums = cumulative[cumulative['start'] == fy_start].sort_values('end')
+                    if fy_cums.empty:
+                        continue
+
+                    fy_end_approx = fy_cums['end'].max()
+
+                    prev_cumulative_val = 0.0
+                    # Check if we have a Q1 single-quarter value for this FY
+                    for qe, (qv, _) in results.items():
+                        if fy_start <= qe <= fy_end_approx:
+                            days_from_start = (qe - fy_start).days
+                            if days_from_start < 120:
+                                prev_cumulative_val = qv
+                                break
+
+                    for _, cum_row in fy_cums.iterrows():
+                        cum_end = cum_row['end']
+                        if cum_end in results:
+                            # Already have a single-quarter value, but still
+                            # update prev_cumulative_val so subsequent diffs
+                            # are correct
+                            prev_cumulative_val = cum_row['val']
+                            continue
+
+                        q_val = cum_row['val'] - prev_cumulative_val
+                        results[cum_end] = (q_val, cum_row['filed'])
+                        prev_cumulative_val = cum_row['val']
+
+    # --- Step 3: Derive Q4 from 10-K annual values ---
+    if 'start' in raw.columns:
+        annual_dur = raw.dropna(subset=['start', 'end']).copy()
+        if not annual_dur.empty:
+            annual_dur['duration_days'] = (annual_dur['end'] - annual_dur['start']).dt.days
+            fy_rows = annual_dur[annual_dur['duration_days'] >= 300]
+        else:
+            fy_rows = pd.DataFrame()
+    else:
+        fy_rows = pd.DataFrame()
+
+    if fy_rows.empty and 'fp' in raw.columns:
+        annual = raw[raw['form'].isin(['10-K', '10-K/A'])]
         fy_rows = annual[annual['fp'] == 'FY']
-        if fy_rows.empty:
-            # Some companies don't have fp=FY, try filtering by duration
-            if 'start' in annual.columns:
-                annual_dur = annual.dropna(subset=['start', 'end'])
-                annual_dur['duration_days'] = (annual_dur['end'] - annual_dur['start']).dt.days
-                fy_rows = annual_dur[annual_dur['duration_days'] >= 300]
 
+    if not fy_rows.empty:
+        fy_rows = fy_rows.sort_values('filed').drop_duplicates(subset=['end'], keep='last')
         for _, fy_row in fy_rows.iterrows():
             fy_end = fy_row['end']
             fy_val = fy_row['val']
             fy_filed = fy_row['filed']
 
-            # Check if we already have this quarter from a 10-Q
             if fy_end in results:
                 continue
 
             # Sum Q1+Q2+Q3 for this fiscal year
-            fy_year = fy_row.get('fy')
-            if fy_year is not None:
-                # Find Q1-Q3 values in this fiscal year
-                q_sum = 0.0
-                q_count = 0
-                for qe, (qv, _) in results.items():
-                    # A quarter belongs to this FY if its end date is before the FY end
-                    # and within 365 days of it
-                    days_before = (fy_end - qe).days
-                    if 0 < days_before <= 300:
-                        q_sum += qv
-                        q_count += 1
+            q_sum = 0.0
+            q_count = 0
+            for qe, (qv, _) in results.items():
+                days_before = (fy_end - qe).days
+                if 0 < days_before <= 300:
+                    q_sum += qv
+                    q_count += 1
 
-                if q_count == 3:
-                    q4_val = fy_val - q_sum
-                    results[fy_end] = (q4_val, fy_filed)
-                elif q_count == 0:
-                    # No quarterly data at all - can't derive Q4
-                    pass
-                else:
-                    # Partial quarterly data - still derive Q4 as best effort
-                    # but mark it as potentially less accurate
-                    q4_val = fy_val - q_sum
-                    results[fy_end] = (q4_val, fy_filed)
+            if q_count >= 2:
+                q4_val = fy_val - q_sum
+                results[fy_end] = (q4_val, fy_filed)
 
     if not results:
         return pd.DataFrame(columns=['quarter_end', 'value', 'filed'])
@@ -434,63 +477,116 @@ def _extract_quarterly_duration(
     return result_df
 
 
+def _snap_to_nearest(target_date, reference_dates, max_days=45):
+    """Find the nearest reference date within max_days of target_date."""
+    best = None
+    best_dist = max_days + 1
+    for ref in reference_dates:
+        dist = abs((target_date - ref).days)
+        if dist < best_dist:
+            best_dist = dist
+            best = ref
+    return best
+
+
 def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
     """
     Build a clean quarterly fundamentals DataFrame from EDGAR company facts.
 
+    Uses duration fields (income statement) to establish the master quarter list,
+    then snaps instant fields (balance sheet) to those dates. This prevents
+    non-standard dates (e.g., cover page filing dates) from inflating the output.
+
     Returns DataFrame with all fundamental metrics per quarter.
     """
-    all_series = {}
+    duration_series = {}
+    instant_series = {}
+
+    # Extract income statement items (duration) FIRST to establish master quarters
+    for field in DURATION_FIELDS:
+        series = _extract_quarterly_duration(facts_data, field)
+        if not series.empty:
+            duration_series[field] = series
 
     # Extract balance sheet items (instant)
     for field in INSTANT_FIELDS:
         series = _extract_quarterly_instant(facts_data, field)
         if not series.empty:
-            all_series[field] = series
+            instant_series[field] = series
 
-    # Extract income statement items (duration)
-    for field in DURATION_FIELDS:
-        series = _extract_quarterly_duration(facts_data, field)
-        if not series.empty:
-            all_series[field] = series
-
-    if not all_series:
+    if not duration_series and not instant_series:
         return None
 
-    # Build a master list of quarter-end dates and filing dates
-    # Collect all quarter_end dates across all series
-    all_quarters = set()
+    # Build master quarter list from duration fields (authoritative)
+    master_quarters = set()
     filing_dates = {}  # quarter_end -> latest filing date
 
-    for field, series in all_series.items():
+    for field, series in duration_series.items():
         for _, row in series.iterrows():
             qe = row['quarter_end']
-            all_quarters.add(qe)
+            master_quarters.add(qe)
             if qe not in filing_dates or row['filed'] > filing_dates[qe]:
                 filing_dates[qe] = row['filed']
 
-    if not all_quarters:
+    # If no duration fields, fall back to instant fields but filter to month-end dates
+    if not master_quarters:
+        for field, series in instant_series.items():
+            for _, row in series.iterrows():
+                qe = row['quarter_end']
+                # Only accept dates near month-ends (day >= 25 or day <= 5 of next month)
+                if qe.day >= 25 or qe.day <= 5:
+                    master_quarters.add(qe)
+                    if qe not in filing_dates or row['filed'] > filing_dates[qe]:
+                        filing_dates[qe] = row['filed']
+
+    if not master_quarters:
         return None
+
+    sorted_quarters = sorted(master_quarters)
+
+    # Also collect filing dates from instant fields for quarters they match
+    for field, series in instant_series.items():
+        for _, row in series.iterrows():
+            snapped = _snap_to_nearest(row['quarter_end'], sorted_quarters, max_days=45)
+            if snapped is not None and (snapped not in filing_dates or row['filed'] > filing_dates[snapped]):
+                filing_dates[snapped] = row['filed']
 
     # Build rows
     rows = []
-    for qe in sorted(all_quarters):
+    for qe in sorted_quarters:
         row = {
             'quarter_end_date': qe,
             'report_date': filing_dates.get(qe, pd.NaT),
         }
 
-        # Look up each field's value for this quarter
-        for field, series in all_series.items():
+        # Duration fields: exact match
+        for field, series in duration_series.items():
             match = series[series['quarter_end'] == qe]
             if not match.empty:
                 row[field] = match.iloc[0]['value']
             else:
                 row[field] = np.nan
 
+        # Instant fields: snap to nearest master quarter
+        for field, series in instant_series.items():
+            # Find the closest instant value within ±45 days of this quarter-end
+            series_copy = series.copy()
+            series_copy['_dist'] = (series_copy['quarter_end'] - qe).abs().dt.days
+            close = series_copy[series_copy['_dist'] <= 45]
+            if not close.empty:
+                row[field] = close.sort_values('_dist').iloc[0]['value']
+            else:
+                row[field] = np.nan
+
         rows.append(row)
 
     df = pd.DataFrame(rows)
+
+    # Ensure schema consistency across tickers/runs.
+    expected_fields = sorted(INSTANT_FIELDS | DURATION_FIELDS)
+    for field in expected_fields:
+        if field not in df.columns:
+            df[field] = np.nan
 
     # Combine long-term + short-term debt into total_debt
     lt = df.get('long_term_debt', pd.Series(np.nan, index=df.index))
@@ -590,11 +686,14 @@ def fetch_quarterly_fundamentals(ticker: str, reporting_lag_days: int = 45) -> O
         df['ticker'] = ticker
         df = df.sort_values('quarter_end_date').reset_index(drop=True)
 
-        # Calculate growth metrics
-        df['revenue_growth_qoq'] = df['revenue'].pct_change()
-        df['earnings_growth_qoq'] = df['net_income'].pct_change()
-        df['revenue_growth_yoy'] = df['revenue'].pct_change(periods=4)
-        df['earnings_growth_yoy'] = df['net_income'].pct_change(periods=4)
+        # Calculate growth metrics defensively to avoid dropping tickers with
+        # partial disclosures in some fields.
+        revenue = df['revenue'] if 'revenue' in df.columns else pd.Series(np.nan, index=df.index)
+        net_income = df['net_income'] if 'net_income' in df.columns else pd.Series(np.nan, index=df.index)
+        df['revenue_growth_qoq'] = revenue.pct_change()
+        df['earnings_growth_qoq'] = net_income.pct_change()
+        df['revenue_growth_yoy'] = revenue.pct_change(periods=4)
+        df['earnings_growth_yoy'] = net_income.pct_change(periods=4)
 
         # Format dates as strings for output consistency
         df['quarter_end_date'] = df['quarter_end_date'].dt.strftime('%Y-%m-%d')

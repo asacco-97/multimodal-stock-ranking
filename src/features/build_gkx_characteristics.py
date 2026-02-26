@@ -26,6 +26,17 @@ def _ensure_datetime(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_datetime(df[col], errors="coerce").dt.as_unit("ns")
 
 
+def _coalesce_from_candidates(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
+    """
+    Return the first non-null value across candidate columns, row-wise.
+    """
+    out = pd.Series(np.nan, index=df.index)
+    for c in candidates:
+        if c in df.columns:
+            out = out.combine_first(df[c])
+    return out
+
+
 def _compute_market_return(daily: pd.DataFrame) -> pd.Series:
     """Cross-sectional equal-weight market return proxy by date."""
     return daily.groupby("date")["ret_1d"].transform("mean")
@@ -47,7 +58,7 @@ def _calc_derived_daily_inputs(df: pd.DataFrame) -> pd.DataFrame:
     df["log_ret_1d"] = np.log1p(df["ret_1d"])
     df["dollar_vol"] = df["close"] * df["volume"]
 
-    shares = df.get("shares_outstanding", np.nan)
+    shares = _coalesce_from_candidates(df, ["shares_outstanding", "shares_outstanding_x", "shares_outstanding_y"])
     df["turn_proxy"] = _safe_div(df["volume"], shares)
     df["baspread_proxy"] = _safe_div(df["high"] - df["low"], df["close"])
     df["ill_proxy_daily"] = _safe_div(df["ret_1d"].abs(), df["dollar_vol"])
@@ -97,31 +108,64 @@ def _industry_adjust(series: pd.Series, industry: pd.Series, month_end: pd.Serie
 
 def _compute_accounting_proxies(monthly: pd.DataFrame) -> pd.DataFrame:
     monthly = monthly.sort_values(["ticker", "month_end"]).copy()
-    # Ensure optional source columns exist so groupby operations do not fail.
-    optional_cols = [
-        "market_cap", "shares_outstanding", "total_equity", "net_income", "ebitda", "revenue",
-        "dividend_yield", "total_cash", "inventory", "receivables", "current_ratio", "quick_ratio",
-        "total_debt", "total_assets", "depreciation", "gross_profit", "operating_income", "capex",
-        "research_and_development", "real_estate_assets", "income_tax", "secured_debt",
-        "convertible_debt", "employees", "sga_expense", "asset_turnover", "profit_margin",
-        "operating_cash_flow", "industry", "ppe",
-    ]
-    for c in optional_cols:
-        if c not in monthly.columns:
-            monthly[c] = np.nan
-    if "gross_margin" not in monthly.columns:
+    # Normalize source column names that can vary by fundamentals provider/version.
+    # This preserves any existing canonical columns and only fills gaps from aliases.
+    source_aliases: Dict[str, List[str]] = {
+        "market_cap": ["market_cap", "marketCap"],
+        "shares_outstanding": ["shares_outstanding", "shares_outstanding_x", "shares_outstanding_y", "sharesOutstanding"],
+        "total_equity": ["total_equity", "book_value", "stockholders_equity", "shareholders_equity"],
+        "net_income": ["net_income", "netIncome"],
+        "ebitda": ["ebitda"],
+        "revenue": ["revenue", "total_revenue", "totalRevenue"],
+        "dividend_yield": ["dividend_yield", "trailing_annual_dividend_yield", "trailingAnnualDividendYield"],
+        "total_cash": ["total_cash", "cash_and_cash_equivalents", "cash"],
+        "inventory": ["inventory", "inventories"],
+        "receivables": ["receivables", "accounts_receivable", "accounts_receivable_net"],
+        "current_assets": ["current_assets"],
+        "current_liabilities": ["current_liabilities"],
+        "current_ratio": ["current_ratio", "currentRatio"],
+        "quick_ratio": ["quick_ratio", "quickRatio"],
+        "total_debt": ["total_debt", "totalDebt"],
+        "total_assets": ["total_assets", "totalAssets"],
+        "depreciation": ["depreciation", "depreciation_and_amortization", "depreciationAndAmortization"],
+        "gross_profit": ["gross_profit", "grossProfit"],
+        "operating_income": ["operating_income", "operatingIncome"],
+        "capex": ["capex", "capital_expenditures", "capitalExpenditures"],
+        "research_and_development": ["research_and_development", "rnd", "r_and_d_expense", "researchDevelopment"],
+        "real_estate_assets": ["real_estate_assets", "realEstateAssets"],
+        "income_tax": ["income_tax", "income_tax_expense", "incomeTaxExpense"],
+        "secured_debt": ["secured_debt"],
+        "convertible_debt": ["convertible_debt"],
+        "employees": ["employees", "employee_count"],
+        "sga_expense": ["sga_expense", "selling_general_and_administrative", "sellingGeneralAdministrative"],
+        "asset_turnover": ["asset_turnover"],
+        "profit_margin": ["profit_margin"],
+        "operating_cash_flow": ["operating_cash_flow", "cash_flow_from_operations", "operatingCashFlow"],
+        "industry": ["industry"],
+        "ppe": ["ppe", "property_plant_equipment", "property_plant_and_equipment"],
+    }
+    for canonical, candidates in source_aliases.items():
+        monthly[canonical] = _coalesce_from_candidates(monthly, candidates)
+
+    # Derive helper ratios if not supplied by source data.
+    if "gross_margin" not in monthly.columns or monthly["gross_margin"].notna().sum() == 0:
         monthly["gross_margin"] = _safe_div(monthly["gross_profit"], monthly["revenue"])
-    if "profit_margin" not in monthly.columns:
+    if monthly["profit_margin"].notna().sum() == 0:
         monthly["profit_margin"] = _safe_div(monthly["net_income"], monthly["revenue"])
-    if "asset_turnover" not in monthly.columns:
+    if monthly["asset_turnover"].notna().sum() == 0:
         monthly["asset_turnover"] = _safe_div(monthly["revenue"], monthly["total_assets"])
+    if monthly["current_ratio"].notna().sum() == 0:
+        monthly["current_ratio"] = _safe_div(monthly["current_assets"], monthly["current_liabilities"])
+    if monthly["quick_ratio"].notna().sum() == 0:
+        monthly["quick_ratio"] = _safe_div(
+            monthly["current_assets"] - monthly["inventory"].fillna(0),
+            monthly["current_liabilities"],
+        )
 
     g = monthly.groupby("ticker", group_keys=False)
 
-    mkt_cap = monthly.get("market_cap")
-    if mkt_cap is None:
-        mkt_cap = monthly.get("close", np.nan) * monthly.get("shares_outstanding", np.nan)
-    monthly["mkt_cap_proxy"] = mkt_cap
+    market_cap_fallback = monthly.get("close", np.nan) * monthly["shares_outstanding"]
+    monthly["mkt_cap_proxy"] = monthly["market_cap"].combine_first(market_cap_fallback)
 
     monthly["mvel1"] = np.log(monthly["mkt_cap_proxy"].replace(0, np.nan))
     monthly["bm"] = _safe_div(monthly.get("total_equity"), monthly["mkt_cap_proxy"])
@@ -143,6 +187,7 @@ def _compute_accounting_proxies(monthly: pd.DataFrame) -> pd.DataFrame:
     monthly["gma"] = _safe_div(monthly.get("gross_profit"), monthly.get("revenue"))
     monthly["operprof"] = _safe_div(monthly.get("operating_income"), monthly.get("total_equity"))
     monthly["roaq"] = _safe_div(monthly.get("net_income"), monthly.get("total_assets"))
+    monthly["roavol"] = g["roaq"].transform(lambda s: s.rolling(12).std())
     monthly["roeq"] = _safe_div(monthly.get("net_income"), monthly.get("total_equity"))
     monthly["roic"] = _safe_div(
         monthly.get("operating_income"),
@@ -228,8 +273,14 @@ def _compute_accounting_proxies(monthly: pd.DataFrame) -> pd.DataFrame:
     monthly["indmom"] = monthly.groupby(["month_end", "industry"])["mom12m"].transform("mean")
 
     sin_industries = {"tobacco", "alcohol", "gaming", "casino", "coal", "oil", "weapon", "defense"}
-    ind = monthly.get("industry", pd.Series(index=monthly.index, dtype="object")).astype(str).str.lower()
-    monthly["sin"] = ind.apply(lambda x: float(any(k in x for k in sin_industries)))
+    ind = (
+        monthly.get("industry", pd.Series(index=monthly.index, dtype="object"))
+        .astype("string")
+        .fillna("")
+        .str.lower()
+    )
+    sin_pattern = "|".join(sorted(sin_industries))
+    monthly["sin"] = ind.str.contains(sin_pattern, regex=True, na=False).astype(float)
 
     # Ensure no accidental carry from helper columns for GKX names only later.
     return monthly
@@ -242,6 +293,53 @@ def _extract_gkx_columns(monthly: pd.DataFrame) -> pd.DataFrame:
             out[name] = monthly[name]
         else:
             out[name] = np.nan
+    return out
+
+
+def _add_next_eom_return_target(gkx_monthly: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add next end-of-month return target at monthly frequency.
+    return_t+1m = close_{t+1 month-end} / close_{t month-end} - 1
+    """
+    out = gkx_monthly.copy()
+    px = monthly[["ticker", "month_end", "close"]].copy()
+    px = px.sort_values(["ticker", "month_end"])
+    px["return_eom_t+1"] = px.groupby("ticker")["close"].shift(-1) / px["close"] - 1
+    out = out.merge(px[["ticker", "month_end", "return_eom_t+1"]], on=["ticker", "month_end"], how="left")
+    return out
+
+
+def _add_cross_sectional_rank_normalization(gkx_monthly: pd.DataFrame) -> pd.DataFrame:
+    """
+    GKX-style preprocessing at each month:
+    1) Impute missing characteristic values with cross-sectional median.
+    2) Add cross-sectional percentile rank and [-1, 1] normalized versions.
+    """
+    out = gkx_monthly.copy()
+
+    # Ensure canonical raw columns exist first.
+    for name in GKX_94:
+        if name not in out.columns:
+            out[name] = np.nan
+
+    # Build transformed columns in a side dict and concatenate once to avoid
+    # DataFrame fragmentation from repeated column insertion.
+    transformed = {}
+    grouped = out.groupby("month_end", sort=False)
+
+    for name in GKX_94:
+        # Cross-sectional median imputation by month.
+        cs_median = grouped[name].transform("median")
+        out[name] = out[name].fillna(cs_median)
+
+        # Cross-sectional rank in (0, 1], then map to [-1, 1].
+        cs_rank = grouped[name].rank(method="average", pct=True)
+        transformed[f"{name}_csrank"] = cs_rank.astype(np.float32)
+        transformed[f"{name}_csnorm"] = (2.0 * cs_rank - 1.0).astype(np.float32)
+
+    if transformed:
+        out = pd.concat([out, pd.DataFrame(transformed, index=out.index)], axis=1)
+
     return out
 
 
@@ -294,21 +392,59 @@ def build_gkx_characteristics(df: pd.DataFrame, asof: str = "month_end") -> pd.D
     monthly = _compute_accounting_proxies(monthly)
 
     gkx = _extract_gkx_columns(monthly)
+    gkx = _add_next_eom_return_target(gkx, monthly)
+    gkx = _add_cross_sectional_rank_normalization(gkx)
     return gkx
 
 
-def attach_gkx_to_daily(df_daily: pd.DataFrame, gkx_monthly: pd.DataFrame) -> pd.DataFrame:
+def attach_gkx_to_daily(
+    df_daily: pd.DataFrame,
+    gkx_monthly: pd.DataFrame,
+    lag_months: int = 1,
+    include_transformed: bool = False,
+) -> pd.DataFrame:
     """
-    Join monthly GKX values to daily rows by ticker/month_end.
+    Join monthly GKX values to daily rows by ticker with a lagged month-end key.
+
+    `lag_months=1` is the safe default for no-lookahead:
+    each daily row at date t receives characteristics from the prior month-end.
     """
+    if lag_months < 1:
+        raise ValueError("lag_months must be >= 1 to avoid look-ahead leakage.")
+
     out = df_daily.copy()
     out["date"] = _ensure_datetime(out, "date")
-    out["month_end"] = out["date"] + pd.offsets.MonthEnd(0)
-    merged = out.merge(gkx_monthly, on=["ticker", "month_end"], how="left")
+    out["gkx_month_end"] = out["date"] + pd.offsets.MonthEnd(-lag_months)
+
+    # Attach canonical raw GKX columns by default.
+    # Optional transformed columns are available but omitted by default for memory efficiency.
+    attach_cols = list(GKX_94)
+    if include_transformed:
+        attach_cols += [c for c in gkx_monthly.columns if c.endswith("_csrank") or c.endswith("_csnorm")]
+    attach_cols = [c for c in attach_cols if c in gkx_monthly.columns]
+
+    gkx_attach = gkx_monthly[["ticker", "month_end"] + attach_cols].copy()
+
+    # Avoid _x/_y suffixes by preferring attached GKX values on overlapping column names.
+    overlap = [c for c in attach_cols if c in out.columns]
+    if overlap:
+        out = out.drop(columns=overlap)
+    merged = out.merge(
+        gkx_attach,
+        left_on=["ticker", "gkx_month_end"],
+        right_on=["ticker", "month_end"],
+        how="left",
+    )
+    # Keep a single canonical key name in the output.
+    merged = merged.drop(columns=["month_end"]).rename(columns={"gkx_month_end": "month_end"})
     return merged
 
 
-def build_and_attach_gkx(df_daily: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_and_attach_gkx(
+    df_daily: pd.DataFrame,
+    lag_months: int = 1,
+    include_transformed: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Convenience wrapper:
     1) Build monthly GKX characteristics
@@ -317,5 +453,10 @@ def build_and_attach_gkx(df_daily: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataF
     """
     gkx_monthly = build_gkx_characteristics(df_daily, asof="month_end")
     coverage = generate_gkx_coverage_report(gkx_monthly)
-    attached = attach_gkx_to_daily(df_daily, gkx_monthly)
+    attached = attach_gkx_to_daily(
+        df_daily,
+        gkx_monthly,
+        lag_months=lag_months,
+        include_transformed=include_transformed,
+    )
     return attached, gkx_monthly, coverage

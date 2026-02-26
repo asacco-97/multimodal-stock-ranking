@@ -8,10 +8,70 @@ import pandas as pd
 import numpy as np
 import os
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 import requests
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+
+
+def _normalize_ticker(ticker: str) -> str:
+    return str(ticker).strip().upper().replace(".", "-")
+
+
+def get_all_us_symbols_with_metadata() -> pd.DataFrame:
+    """
+    Fetch all US-listed symbols from NASDAQ official symbol files with ETF flags.
+
+    Returns:
+        DataFrame with columns: ticker, is_etf
+    """
+    try:
+        NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+        OTHER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+
+        print("Fetching all US symbols from NASDAQ official data...")
+
+        nasdaq = pd.read_csv(NASDAQ_URL, sep="|")
+        nasdaq = nasdaq[nasdaq["Symbol"].notna()].copy()
+        nasdaq = nasdaq[nasdaq["Symbol"].astype(str).str.strip() != ""].copy()
+        nasdaq_df = pd.DataFrame({
+            "ticker": nasdaq["Symbol"].map(_normalize_ticker),
+            "is_etf": nasdaq.get("ETF", "N").astype(str).str.upper().eq("Y"),
+        })
+
+        other = pd.read_csv(OTHER_URL, sep="|")
+        other = other[other["ACT Symbol"].notna()].copy()
+        other = other[other["ACT Symbol"].astype(str).str.strip() != ""].copy()
+        other_df = pd.DataFrame({
+            "ticker": other["ACT Symbol"].map(_normalize_ticker),
+            "is_etf": other.get("ETF", "N").astype(str).str.upper().eq("Y"),
+        })
+
+        listings = pd.concat([nasdaq_df, other_df], ignore_index=True)
+
+        # Filter out test symbols and malformed symbols.
+        listings = listings[
+            (~listings["ticker"].str.endswith(".TEST", na=False))
+            & (~listings["ticker"].str.startswith("TEST", na=False))
+            & (listings["ticker"].str.len() <= 6)
+            & (listings["ticker"].str.replace("-", "", regex=False).str.isalnum())
+        ].copy()
+
+        # Keep one row per ticker; if any source marks ETF, treat as ETF.
+        listings = (
+            listings.groupby("ticker", as_index=False)["is_etf"]
+            .max()
+            .sort_values("ticker")
+            .reset_index(drop=True)
+        )
+
+        print(f"Fetched {len(listings)} US symbols from official NASDAQ data")
+        return listings
+
+    except Exception as e:
+        print(f"Error fetching symbols from NASDAQ: {e}")
+        return pd.DataFrame(columns=["ticker", "is_etf"])
+
 
 def get_all_us_symbols() -> List[str]:
     """
@@ -21,48 +81,8 @@ def get_all_us_symbols() -> List[str]:
     Returns:
         List of all US stock symbols
     """
-    try:
-        # NASDAQ official symbol lists
-        NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-        OTHER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-
-        print("Fetching all US symbols from NASDAQ official data...")
-
-        # Fetch NASDAQ-listed symbols
-        nasdaq = pd.read_csv(NASDAQ_URL, sep="|")
-        # Last row is often metadata, filter it out
-        nasdaq = nasdaq[nasdaq['Symbol'].notna()]
-        nasdaq = nasdaq[nasdaq['Symbol'].str.strip() != '']
-
-        # Fetch symbols from other exchanges (NYSE, AMEX, etc.)
-        other = pd.read_csv(OTHER_URL, sep="|")
-        other = other[other['ACT Symbol'].notna()]
-        other = other[other['ACT Symbol'].str.strip() != '']
-
-        # Combine symbols
-        symbols = pd.concat([
-            nasdaq["Symbol"],
-            other["ACT Symbol"]
-        ]).dropna().unique().tolist()
-
-        # Filter out test symbols and preferred shares
-        symbols = [
-            s for s in symbols
-            if not any([
-                s.endswith('.TEST'),
-                s.startswith('test'),
-                len(s) > 6,  # Usually indicates preferred shares or special classes
-                not s.replace('-', '').replace('.', '').isalnum()  # Non-alphanumeric
-            ])
-        ]
-
-        print(f"Fetched {len(symbols)} US symbols from official NASDAQ data")
-        return symbols
-
-    except Exception as e:
-        print(f"Error fetching symbols from NASDAQ: {e}")
-        print("Falling back to Wikipedia method...")
-        return []
+    listings = get_all_us_symbols_with_metadata()
+    return listings["ticker"].tolist()
 
 def chunk_list(lst: List, n_chunks: int) -> List[List]:
     """Split a list into n roughly equal chunks."""
@@ -118,6 +138,20 @@ def process_batch(args) -> List[Dict]:
             continue
 
     return results
+
+
+def _compute_liquidity_for_tickers(
+    tickers: List[str],
+    lookback_days: int,
+    min_obs: int,
+) -> pd.DataFrame:
+    """
+    Compute liquidity for an explicit ticker subset (used for forced includes).
+    """
+    if not tickers:
+        return pd.DataFrame(columns=["ticker", "avg_price", "avg_volume", "avg_dollar_volume"])
+    rows = process_batch((tickers, lookback_days, min_obs))
+    return pd.DataFrame(rows)
 
 def compute_liquidity_parallel(
     symbols: List[str],
@@ -317,7 +351,9 @@ def get_top_n_equities_by_liquidity(
     save_path: str = "data/universe/",
     lookback_days: int = 60,
     n_workers: int = None,
-    use_nasdaq_source: bool = True
+    use_nasdaq_source: bool = True,
+    exclude_etfs: bool = False,
+    force_include_tickers: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Get the top N US equities by liquidity (average dollar volume).
@@ -330,6 +366,9 @@ def get_top_n_equities_by_liquidity(
         lookback_days: Number of days to compute average volume
         n_workers: Number of parallel workers (None = auto-detect)
         use_nasdaq_source: If True, use NASDAQ official data; else use Wikipedia
+        exclude_etfs: If True, removes ETF tickers from ranking universe.
+        force_include_tickers: Optional tickers to force into final universe
+            (e.g. ["SPY", "QQQ", "IWM"]) for benchmark comparisons.
 
     Returns:
         DataFrame with top N equities sorted by liquidity
@@ -339,13 +378,18 @@ def get_top_n_equities_by_liquidity(
     # Step 1: Get all US symbols
     print("\n=== Step 1: Fetching all US symbols ===")
 
+    listings_df = pd.DataFrame(columns=["ticker", "is_etf"])
     if use_nasdaq_source:
-        all_symbols = get_all_us_symbols()
+        listings_df = get_all_us_symbols_with_metadata()
 
         # If NASDAQ fails, fall back to Wikipedia
-        if not all_symbols:
+        if listings_df.empty:
             print("NASDAQ source failed, trying Wikipedia...")
             all_symbols = get_russell1000_approximation()
+        else:
+            if exclude_etfs:
+                listings_df = listings_df[~listings_df["is_etf"]].copy()
+            all_symbols = listings_df["ticker"].tolist()
     else:
         all_symbols = get_russell1000_approximation()
 
@@ -357,7 +401,10 @@ def get_top_n_equities_by_liquidity(
             "3. Try again in a few minutes"
         )
 
-    print(f"Found {len(all_symbols)} total symbols")
+    if exclude_etfs:
+        print(f"Found {len(all_symbols)} non-ETF symbols")
+    else:
+        print(f"Found {len(all_symbols)} total symbols")
 
     # Step 2: Compute liquidity in parallel
     print("\n=== Step 2: Computing liquidity metrics ===")
@@ -376,13 +423,45 @@ def get_top_n_equities_by_liquidity(
             "Try running again or check the error messages above."
         )
 
-    # Step 3: Sort by dollar volume and take top N
-    universe_df = universe_df.sort_values('avg_dollar_volume', ascending=False).head(n)
+    # Step 3: Sort by dollar volume and take top N.
+    ranked_df = universe_df.sort_values('avg_dollar_volume', ascending=False).copy()
+    universe_df = ranked_df.head(n).copy()
+    universe_df["forced_include"] = False
+
+    # Optionally force-include benchmark tickers (e.g., SPY/QQQ/IWM).
+    if force_include_tickers:
+        force_set = {_normalize_ticker(t) for t in force_include_tickers if str(t).strip()}
+        if force_set:
+            universe_df.loc[universe_df["ticker"].isin(force_set), "forced_include"] = True
+            missing_forced = [t for t in sorted(force_set) if t not in set(universe_df["ticker"])]
+            if missing_forced:
+                forced_rows = ranked_df[ranked_df["ticker"].isin(missing_forced)].copy()
+                still_missing = [t for t in missing_forced if t not in set(forced_rows["ticker"])]
+                if still_missing:
+                    extra = _compute_liquidity_for_tickers(
+                        still_missing,
+                        lookback_days=lookback_days,
+                        min_obs=20,
+                    )
+                    if not extra.empty:
+                        forced_rows = pd.concat([forced_rows, extra], ignore_index=True)
+                if not forced_rows.empty:
+                    forced_rows["forced_include"] = True
+                    universe_df = pd.concat([universe_df, forced_rows], ignore_index=True)
+                    universe_df = universe_df.drop_duplicates(subset=["ticker"], keep="first")
+            added = universe_df["forced_include"].sum()
+            print(f"Forced-included benchmark tickers present: {int(added)}")
+
+    universe_df = universe_df.sort_values("avg_dollar_volume", ascending=False).reset_index(drop=True)
     universe_df['rank'] = range(1, len(universe_df) + 1)
 
     # Step 4: Save results
-    csv_path = os.path.join(save_path, f'top_{n}_equities_by_liquidity.csv')
-    json_path = os.path.join(save_path, f'top_{n}_tickers.json')
+    if exclude_etfs:
+        csv_path = os.path.join(save_path, f"top_{n}_equities_by_liquidity_non_etf.csv")
+        json_path = os.path.join(save_path, f"top_{n}_tickers_non_etf.json")
+    else:
+        csv_path = os.path.join(save_path, f'top_{n}_equities_by_liquidity.csv')
+        json_path = os.path.join(save_path, f'top_{n}_tickers.json')
 
     universe_df.to_csv(csv_path, index=False)
 
@@ -392,7 +471,10 @@ def get_top_n_equities_by_liquidity(
         json.dump(ticker_list, f, indent=2)
 
     print(f"\n=== Summary ===")
-    print(f"Top {len(universe_df)} equities by liquidity identified")
+    if exclude_etfs:
+        print(f"Top {n} non-ETF equities by liquidity identified ({len(universe_df)} total incl. forced benchmarks)")
+    else:
+        print(f"Top {len(universe_df)} equities by liquidity identified")
     print(f"Avg dollar volume range: ${universe_df['avg_dollar_volume'].min():,.0f} - ${universe_df['avg_dollar_volume'].max():,.0f}")
     print(f"Avg volume range: {universe_df['avg_volume'].min():,.0f} - {universe_df['avg_volume'].max():,.0f}")
     print(f"Avg price range: ${universe_df['avg_price'].min():.2f} - ${universe_df['avg_price'].max():.2f}")
@@ -401,7 +483,8 @@ def get_top_n_equities_by_liquidity(
     print(f"  - {json_path}")
 
     print(f"\nTop 10 by liquidity:")
-    display_df = universe_df[['rank', 'ticker', 'avg_dollar_volume', 'avg_volume', 'avg_price']].head(10).copy()
+    display_cols = ['rank', 'ticker', 'avg_dollar_volume', 'avg_volume', 'avg_price', 'forced_include']
+    display_df = universe_df[display_cols].head(10).copy()
     display_df['avg_dollar_volume'] = display_df['avg_dollar_volume'].apply(lambda x: f"${x:,.0f}")
     display_df['avg_volume'] = display_df['avg_volume'].apply(lambda x: f"{x:,.0f}")
     display_df['avg_price'] = display_df['avg_price'].apply(lambda x: f"${x:.2f}")
@@ -425,8 +508,29 @@ def load_universe(path: str = "data/universe/top_1000_tickers.json") -> List[str
     return tickers
 
 if __name__ == "__main__":
-    # Generate top 1000 US equities by liquidity
-    universe = get_top_n_equities_by_liquidity(n=1000)
+    import argparse
 
-    print("\n=== Sector Distribution ===")
-    print(universe['sector'].value_counts())
+    parser = argparse.ArgumentParser(description="Build liquid US equity universe")
+    parser.add_argument("--n", type=int, default=1000, help="Number of non-ETF equities to rank")
+    parser.add_argument("--lookback_days", type=int, default=60, help="Liquidity lookback window")
+    parser.add_argument("--exclude_etfs", action="store_true", help="Exclude ETFs from ranked universe")
+    parser.add_argument(
+        "--force_include_tickers",
+        type=str,
+        default="SPY,QQQ,IWM",
+        help="Comma-separated benchmark tickers to force-include",
+    )
+    args = parser.parse_args()
+
+    force_include = [
+        _normalize_ticker(t)
+        for t in (args.force_include_tickers or "").split(",")
+        if str(t).strip()
+    ]
+
+    get_top_n_equities_by_liquidity(
+        n=args.n,
+        lookback_days=args.lookback_days,
+        exclude_etfs=args.exclude_etfs,
+        force_include_tickers=force_include,
+    )
