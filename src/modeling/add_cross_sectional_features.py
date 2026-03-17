@@ -227,15 +227,17 @@ def add_quintile_buckets(df: pd.DataFrame,
 
 def add_rank_changes(df: pd.DataFrame,
                      rank_features: List[str],
-                     periods: List[int] = [1, 5, 20],
+                     periods: List[int] = [1, 3, 6], # at level of dataset
                      suffix: str = '_rank_change',
                      inplace: bool = False,
-                     assume_sorted: bool = False) -> pd.DataFrame:
+                     assume_sorted: bool = False,
+                     date_col: str = "date",
+                     period_label: str = "d") -> pd.DataFrame:
     """
     Add changes in rank over time (rank momentum).
 
     Args:
-        df: Input DataFrame (must be sorted by ticker and date)
+        df: Input DataFrame (must be sorted by ticker and date_col)
         rank_features: List of rank column names
         periods: List of periods to calculate rank changes
         suffix: Suffix to add to rank change column names
@@ -247,7 +249,7 @@ def add_rank_changes(df: pd.DataFrame,
 
     # Ensure sorted
     if not assume_sorted:
-        df_copy = df_copy.sort_values(['ticker', 'date']).reset_index(drop=True)
+        df_copy = df_copy.sort_values(['ticker', date_col]).reset_index(drop=True)
 
     for rank_feature in rank_features:
         if rank_feature not in df_copy.columns:
@@ -255,7 +257,7 @@ def add_rank_changes(df: pd.DataFrame,
             continue
 
         for period in periods:
-            change_col = f"{rank_feature}{suffix}_{period}d"
+            change_col = f"{rank_feature}{suffix}_{period}{period_label}"
             df_copy[change_col] = _as_float32(df_copy.groupby('ticker', sort=False)[rank_feature].diff(periods=period))
 
     return df_copy
@@ -333,7 +335,8 @@ def create_target_variable(df: pd.DataFrame,
 
 
 def add_all_cross_sectional_features(df: pd.DataFrame,
-                                      sector_col: Optional[str] = 'sector') -> pd.DataFrame:
+                                      sector_col: Optional[str] = 'sector',
+                                      date_col: str = 'date') -> pd.DataFrame:
     """
     Main function to add all cross-sectional features at once.
 
@@ -351,15 +354,18 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
     Args:
         df: Input DataFrame with merged data
         sector_col: Column containing sector information (None to skip sector features)
+        date_col: Time column used for cross-sectional grouping ('date' or 'month_end')
 
     Returns:
         DataFrame with all cross-sectional features added
     """
     print("Adding cross-sectional features for stock ranking model...")
+    if date_col not in df.columns:
+        raise ValueError(f"date_col '{date_col}' not found in DataFrame")
 
-    # Ensure sorted by ticker and date
-    df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
-    df = optimize_numeric_memory(df, exclude=["date"])
+    # Ensure sorted by ticker and time column
+    df = df.sort_values(['ticker', date_col]).reset_index(drop=True)
+    df = optimize_numeric_memory(df, exclude=[date_col])
 
     # Registry-driven GKX base features plus optional controls for backward compatibility.
     gkx_features = get_gkx_feature_names()
@@ -386,28 +392,40 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
 
     # 1. Add percentile ranks
     print("  - Adding percentile ranks...")
-    df = add_percentile_ranks(df, existing_features, inplace=True)
+    df = add_percentile_ranks(df, existing_features, groupby_col=date_col, inplace=True)
     gc.collect()
 
     # 2. Add quintile buckets for key features (from rank columns to reduce memory).
     print("  - Adding quintile buckets...")
     key_features = [f for f in ['mom12m', 'mom6m', 'bm', 'ep', 'roeq', 'roaq', 'operprof'] if f in df.columns]
     if key_features:
-        df = add_quintile_buckets(df, key_features, inplace=True)
+        df = add_quintile_buckets(df, key_features, groupby_col=date_col, inplace=True)
     gc.collect()
 
     # 3. Add z-scores
     print("  - Adding z-scores...")
-    df = add_z_scores(df, existing_features, inplace=True)
+    df = add_z_scores(df, existing_features, groupby_col=date_col, inplace=True)
     gc.collect()
 
     # 4. Add sector-relative features (if sector column exists)
     if sector_col and sector_col in df.columns:
         print("  - Adding sector-relative features...")
-        df = add_sector_relative_features(df, existing_features, sector_col=sector_col, inplace=True)
+        df = add_sector_relative_features(
+            df,
+            existing_features,
+            sector_col=sector_col,
+            groupby_col=date_col,
+            inplace=True,
+        )
 
         print("  - Adding sector ranks...")
-        df = add_sector_ranks(df, existing_features, sector_col=sector_col, inplace=True)
+        df = add_sector_ranks(
+            df,
+            existing_features,
+            sector_col=sector_col,
+            groupby_col=date_col,
+            inplace=True,
+        )
     else:
         print(f"  - Skipping sector features ('{sector_col}' column not found)")
     gc.collect()
@@ -420,11 +438,19 @@ def add_all_cross_sectional_features(df: pd.DataFrame,
     ]
     rank_features = [f"{feat}_rank" for feat in rank_momentum_base if f"{feat}_rank" in df.columns]
     if rank_features:
-        df = add_rank_changes(df, rank_features, inplace=True, assume_sorted=True)
+        period_label = "m" if date_col == "month_end" else "d"
+        df = add_rank_changes(
+            df,
+            rank_features,
+            inplace=True,
+            assume_sorted=True,
+            date_col=date_col,
+            period_label=period_label,
+        )
     gc.collect()
 
     print(f"Added cross-sectional features. New shape: {df.shape}")
-    print(f"  Total features: {len([c for c in df.columns if c not in ['ticker', 'date']])}")
+    print(f"  Total features: {len([c for c in df.columns if c not in ['ticker', date_col]])}")
 
     return df
 
@@ -439,6 +465,8 @@ if __name__ == "__main__":
                        help="Output parquet file")
     parser.add_argument("--sector_col", type=str, default=None,
                        help="Column containing sector information (optional)")
+    parser.add_argument("--date_col", type=str, default="date",
+                       help="Time column for grouping (e.g., date or month_end)")
 
     args = parser.parse_args()
 
@@ -447,13 +475,14 @@ if __name__ == "__main__":
     df = pd.read_parquet(args.input)
 
     print(f"Input shape: {df.shape}")
-    print(f"Date range: {df['date'].min()} to {df['date'].max()}")
+    print(f"Date range: {df[args.date_col].min()} to {df[args.date_col].max()}")
     print(f"Tickers: {df['ticker'].nunique()}")
 
     # Add cross-sectional features
     df_modeling = add_all_cross_sectional_features(
         df,
         sector_col=args.sector_col,
+        date_col=args.date_col,
     )
 
     # Save

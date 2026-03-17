@@ -26,6 +26,14 @@ def _ensure_datetime(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_datetime(df[col], errors="coerce").dt.as_unit("ns")
 
 
+def _downcast_float64(df: pd.DataFrame, exclude: List[str] | None = None) -> pd.DataFrame:
+    exclude = set(exclude or [])
+    float_cols = [c for c in df.select_dtypes(include=["float64"]).columns if c not in exclude]
+    if float_cols:
+        df[float_cols] = df[float_cols].astype(np.float32)
+    return df
+
+
 def _coalesce_from_candidates(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
     """
     Return the first non-null value across candidate columns, row-wise.
@@ -52,6 +60,7 @@ def _rolling_beta(group: pd.DataFrame, window: int = 252) -> pd.Series:
 
 def _calc_derived_daily_inputs(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["ticker", "date"]).copy()
+    df = _downcast_float64(df, exclude=["date"])
     g = df.groupby("ticker", group_keys=False)
 
     df["ret_1d"] = g["close"].pct_change()
@@ -88,16 +97,30 @@ def _calc_derived_daily_inputs(df: pd.DataFrame) -> pd.DataFrame:
     df["beta"] = g.apply(_rolling_beta).reset_index(level=0, drop=True)
     df["betasq"] = df["beta"] ** 2
 
+    df = _downcast_float64(df, exclude=["date"])
     return df
 
 
 def _build_monthly_snapshot(df: pd.DataFrame) -> pd.DataFrame:
     """Take end-of-month row per ticker after daily rolling features are computed."""
-    out = df.copy()
-    out["month_end"] = out["date"] + pd.offsets.MonthEnd(0)
-    out = out.sort_values(["ticker", "date"])
-    out = out.groupby(["ticker", "month_end"], as_index=False).tail(1).reset_index(drop=True)
-    return out
+    month_end = df["date"] + pd.offsets.MonthEnd(0)
+    keys = pd.DataFrame(
+        {
+            "ticker": df["ticker"].values,
+            "date": df["date"].values,
+            "month_end": month_end.values,
+        },
+        index=df.index,
+    )
+    idx = (
+        keys.sort_values(["ticker", "date"])
+        .groupby(["ticker", "month_end"], as_index=False)
+        .tail(1)
+        .index
+    )
+    out = df.loc[idx].copy()
+    out["month_end"] = month_end.loc[idx].values
+    return out.reset_index(drop=True)
 
 
 def _industry_adjust(series: pd.Series, industry: pd.Series, month_end: pd.Series) -> pd.Series:
@@ -382,13 +405,69 @@ def build_gkx_characteristics(df: pd.DataFrame, asof: str = "month_end") -> pd.D
     if missing:
         raise ValueError(f"Missing required columns for GKX build: {sorted(missing)}")
 
-    work = df.copy()
-    work["date"] = _ensure_datetime(work, "date")
-    if "report_date" in work.columns:
-        work["report_date"] = _ensure_datetime(work, "report_date")
+    # Minimize memory by avoiding a full-frame copy of all merged daily columns.
+    # Build GKX in two narrow passes:
+    # 1) OHLCV daily features -> month-end snapshot.
+    # 2) Fundamentals/metadata month-end snapshot -> merge to monthly panel.
+    daily_cols = [
+        c for c in [
+            "ticker", "date", "close", "high", "low", "volume",
+            "shares_outstanding", "shares_outstanding_x", "shares_outstanding_y",
+        ]
+        if c in df.columns
+    ]
+    daily_work = df[daily_cols].copy()
+    daily_work["date"] = _ensure_datetime(daily_work, "date")
+    daily_work = _downcast_float64(daily_work, exclude=["date"])
+    daily_work = _calc_derived_daily_inputs(daily_work)
+    monthly = _build_monthly_snapshot(daily_work)
 
-    work = _calc_derived_daily_inputs(work)
-    monthly = _build_monthly_snapshot(work)
+    accounting_candidate_cols = [
+        "market_cap", "marketCap",
+        "shares_outstanding", "shares_outstanding_x", "shares_outstanding_y", "sharesOutstanding",
+        "total_equity", "book_value", "stockholders_equity", "shareholders_equity",
+        "net_income", "netIncome",
+        "ebitda",
+        "revenue", "total_revenue", "totalRevenue",
+        "dividend_yield", "trailing_annual_dividend_yield", "trailingAnnualDividendYield",
+        "total_cash", "cash_and_cash_equivalents", "cash",
+        "inventory", "inventories",
+        "receivables", "accounts_receivable", "accounts_receivable_net",
+        "current_assets", "current_liabilities",
+        "current_ratio", "currentRatio",
+        "quick_ratio", "quickRatio",
+        "total_debt", "totalDebt",
+        "total_assets", "totalAssets",
+        "depreciation", "depreciation_and_amortization", "depreciationAndAmortization",
+        "gross_profit", "grossProfit",
+        "operating_income", "operatingIncome",
+        "capex", "capital_expenditures", "capitalExpenditures",
+        "research_and_development", "rnd", "r_and_d_expense", "researchDevelopment",
+        "real_estate_assets", "realEstateAssets",
+        "income_tax", "income_tax_expense", "incomeTaxExpense",
+        "secured_debt",
+        "convertible_debt",
+        "employees", "employee_count",
+        "sga_expense", "selling_general_and_administrative", "sellingGeneralAdministrative",
+        "asset_turnover",
+        "profit_margin",
+        "gross_margin",
+        "operating_cash_flow", "cash_flow_from_operations", "operatingCashFlow",
+        "industry",
+        "ppe", "property_plant_equipment", "property_plant_and_equipment",
+        "report_date",
+    ]
+    fund_cols = [c for c in accounting_candidate_cols if c in df.columns]
+    if fund_cols:
+        fund_work = df[["ticker", "date"] + fund_cols].copy()
+        fund_work["date"] = _ensure_datetime(fund_work, "date")
+        if "report_date" in fund_work.columns:
+            fund_work["report_date"] = _ensure_datetime(fund_work, "report_date")
+        fund_work = _downcast_float64(fund_work, exclude=["date", "report_date"])
+        fund_monthly = _build_monthly_snapshot(fund_work)
+        keep_fund = ["ticker", "month_end"] + [c for c in fund_cols if c != "date"]
+        monthly = monthly.merge(fund_monthly[keep_fund], on=["ticker", "month_end"], how="left")
+
     monthly = _compute_accounting_proxies(monthly)
 
     gkx = _extract_gkx_columns(monthly)
