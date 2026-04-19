@@ -3,27 +3,54 @@ Enhanced pipeline for comprehensive equity data collection and processing.
 Supports top 1000 US equities with price, fundamental, macro, and news data.
 """
 import os
+import time
+import gc
 from datetime import datetime
 import pandas as pd
 import json
 from typing import Optional, List
 
 # Import data fetching modules
-from src.data_fetch.get_universe import get_top_n_equities_by_liquidity, load_universe
+from data_fetch.get_universe import get_top_n_equities_by_liquidity, load_universe
 from src.data_fetch.fetch_ohlcv import fetch_ohlcv_batch, load_ohlcv_combined
-from src.data_fetch.fetch_fundamentals_quarterly import (
+from data_fetch.fetch_fundamentals_quarterly import (
     fetch_all_quarterly_fundamentals,
-    fetch_current_valuation_metrics,
     merge_fundamentals_point_in_time
 )
 from src.data_fetch.fetch_macro import fetch_all_macro_indicators, merge_macro_with_stocks
 from src.data_fetch.fetch_news import fetch_news
 from src.data_fetch.build_daily_dataset import load_ohlcv_data, load_news_data, build_dataset
-from src.embeddings.embed_news import embed_news
 from src.utils.add_trading_metrics import add_trading_metrics
 from src.modeling.add_cross_sectional_features import add_all_cross_sectional_features
-from src.features.build_gkx_characteristics import build_and_attach_gkx
+from src.features.build_gkx_characteristics import (
+    build_and_attach_gkx,
+    build_gkx_characteristics,
+    generate_gkx_coverage_report,
+)
 from src.constants import validate_gkx_schema
+
+# Current valuation snapshot fields from yfinance .info are "as-of now" values.
+# Merging them into historical rows can create look-ahead leakage.
+CURRENT_VALUATION_SNAPSHOT_COLUMNS = [
+    "market_cap",
+    "marketCap",
+    "enterprise_value",
+    "beta",
+    "shares_outstanding_y",
+    "sharesOutstanding",
+    "float_shares",
+    "held_percent_insiders",
+    "held_percent_institutions",
+    "dividend_yield",
+    "trailing_annual_dividend_yield",
+    "trailingAnnualDividendYield",
+    "book_value_y",
+    "price_to_book",
+    "price_to_sales",
+    "trailing_pe",
+    "sector",
+    "industry",
+]
 
 def run_full_pipeline(
     n_equities: int = 1000,
@@ -31,7 +58,7 @@ def run_full_pipeline(
     end_date: str = "2026-02-09",
     steps: Optional[list] = None,
     data_tag: Optional[str] = None,
-    exclude_etfs: bool = False,
+    exclude_etfs: bool = True,
     benchmark_tickers: Optional[List[str]] = None,
 ):
     """
@@ -90,16 +117,53 @@ def run_full_pipeline(
         )
         tickers = universe_df['ticker'].tolist()
 
-    else:
-        print("\nSkipping universe creation - loading existing universe...")
-        default_path = (
+        # Save metadata about which universe file to use
+        universe_file = (
             f"data/universe/top_{n_equities}_tickers_non_etf.json"
             if exclude_etfs
             else f"data/universe/top_{n_equities}_tickers.json"
         )
-        if not os.path.exists(default_path):
-            default_path = "data/universe/top_1000_tickers.json"
-        tickers = load_universe(default_path)
+        metadata = {
+            'universe_file': universe_file,
+            'n_equities': n_equities,
+            'exclude_etfs': exclude_etfs,
+            'actual_count': len(tickers),
+        }
+        with open(f"{raw_dir}/universe_metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+    else:
+        print("\nSkipping universe creation - loading existing universe...")
+
+        # Try to infer universe from data_tag directory first
+        universe_metadata_path = f"{raw_dir}/universe_metadata.json"
+        if os.path.exists(universe_metadata_path):
+            with open(universe_metadata_path, 'r') as f:
+                metadata = json.load(f)
+                universe_path = metadata.get('universe_file')
+                if universe_path and os.path.exists(universe_path):
+                    tickers = load_universe(universe_path)
+                    print(f"Loaded universe from {universe_path}")
+                else:
+                    # Fallback to inferring from n_equities
+                    default_path = (
+                        f"data/universe/top_{n_equities}_tickers_non_etf.json"
+                        if exclude_etfs
+                        else f"data/universe/top_{n_equities}_tickers.json"
+                    )
+                    if not os.path.exists(default_path):
+                        default_path = "data/universe/top_1000_tickers.json"
+                    tickers = load_universe(default_path)
+        else:
+            # No metadata, try to infer from n_equities
+            default_path = (
+                f"data/universe/top_{n_equities}_tickers_non_etf.json"
+                if exclude_etfs
+                else f"data/universe/top_{n_equities}_tickers.json"
+            )
+            if not os.path.exists(default_path):
+                default_path = "data/universe/top_1000_tickers.json"
+            tickers = load_universe(default_path)
 
     print(f"\nUniverse contains {len(tickers)} tickers")
 
@@ -135,28 +199,21 @@ def run_full_pipeline(
             tickers=tickers,
             save_dir=f"{raw_dir}/fundamentals_quarterly/",
         )
-
-        # Fetch sector/industry info (doesn't change much, can use current)
-        print("\nFetching sector/industry classifications...")
-        valuation_data = []
-        for i, ticker in enumerate(tickers):
-            if (i + 1) % 50 == 0:
-                print(f"  Progress: {i + 1}/{len(tickers)}")
-            val = fetch_current_valuation_metrics(ticker)
-            if val:
-                valuation_data.append(val)
-
-        valuation_df = pd.DataFrame(valuation_data)
-        valuation_df.to_csv(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv", index=False)
     else:
         print("\nSkipping fundamentals fetch - loading existing quarterly data...")
         if os.path.exists(f"{raw_dir}/fundamentals_quarterly/quarterly_fundamentals.parquet"):
             fundamentals_df = pd.read_parquet(f"{raw_dir}/fundamentals_quarterly/quarterly_fundamentals.parquet")
-            valuation_df = pd.read_csv(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv") if os.path.exists(f"{raw_dir}/fundamentals_quarterly/valuation_current.csv") else None
         else:
             print("Warning: No quarterly fundamentals found. Run with --steps fundamentals first.")
             fundamentals_df = None
-            valuation_df = None
+
+    # Current valuation snapshots are intentionally disabled to prevent leakage.
+    valuation_df = None
+    if 'valuation' in steps:
+        print(
+            "\nIgnoring 'valuation' step: current valuation snapshots are disabled "
+            "to prevent look-ahead leakage."
+        )
 
     # ================================================================================
     # STEP 4: Fetch Macroeconomic Data
@@ -198,6 +255,10 @@ def run_full_pipeline(
         print("\n" + "="*80)
         print("STEP 6: Embedding News Headlines")
         print("="*80)
+
+        # Lazy import to avoid loading transformer weights in unrelated steps
+        # (important for multiprocessing stability on Windows).
+        from src.embeddings.embed_news import embed_news
 
         if os.path.exists(f"{processed_dir}/daily_dataset.csv"):
             embed_news(
@@ -259,13 +320,26 @@ def run_full_pipeline(
             merged_df = merge_fundamentals_point_in_time(
                 merged_df,
                 fundamentals_df,
-                valuation_df=valuation_df if 'valuation_df' in locals() else None
+                valuation_df=None,
             )
 
         # Merge macro
         if macro_df is not None and not macro_df.empty:
             print("Merging macro indicators...")
             merged_df = merge_macro_with_stocks(merged_df, macro_df)
+
+        # Coerce any remaining object columns that should be numeric before saving
+        # (guards against string 'Infinity'/'NaN' values from upstream sources)
+        exclude_cols = {'ticker', 'sector', 'industry', 'date', 'report_date', 'quarter_end_date'}
+        for col in merged_df.columns:
+            if merged_df[col].dtype == object and col not in exclude_cols:
+                merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce')
+
+        # Remove current valuation snapshot fields to prevent look-ahead leakage.
+        leak_cols = [c for c in CURRENT_VALUATION_SNAPSHOT_COLUMNS if c in merged_df.columns]
+        if leak_cols:
+            merged_df = merged_df.drop(columns=leak_cols)
+            print(f"Dropped {len(leak_cols)} current valuation snapshot columns from merged dataset.")
 
         # Save merged dataset
         final_path = f"{processed_dir}/final_dataset.parquet"
@@ -277,7 +351,8 @@ def run_full_pipeline(
         # Load existing merged data if skipping merge step
         final_path = f"{processed_dir}/final_dataset.parquet"
         if os.path.exists(final_path):
-            merged_df = pd.read_parquet(final_path)
+            need_merged_df = ('gkx_features' in steps) or ('cross_sectional' not in steps)
+            merged_df = pd.read_parquet(final_path) if need_merged_df else None
         else:
             print("Warning: Merged dataset not found, skipping remaining steps")
             return None
@@ -289,22 +364,37 @@ def run_full_pipeline(
         print("\n" + "="*80)
         print("STEP 9: Building GKX-94 Proxy Characteristics")
         print("="*80)
-        merged_df, gkx_monthly_df, coverage_df = build_and_attach_gkx(merged_df)
+
+        leak_cols = [c for c in CURRENT_VALUATION_SNAPSHOT_COLUMNS if c in merged_df.columns]
+        if leak_cols:
+            merged_df = merged_df.drop(columns=leak_cols)
+            print(f"Removed {len(leak_cols)} current valuation snapshot columns before GKX build.")
+
+        # NOTE: For modeling we only need month-end GKX features.
+        # Build/save monthly GKX directly and skip attaching GKX back to daily rows.
+        gkx_monthly_df = build_gkx_characteristics(merged_df, asof="month_end")
+        coverage_df = generate_gkx_coverage_report(gkx_monthly_df)
+
+        # Original daily merge path kept for reference:
+        # merged_df, gkx_monthly_df, coverage_df = build_and_attach_gkx(merged_df)
         gkx_monthly_path = f"{processed_dir}/gkx_monthly.parquet"
         coverage_csv = f"{processed_dir}/gkx_coverage_report.csv"
         coverage_json = f"{processed_dir}/gkx_coverage_report.json"
-        gkx_daily_path = f"{processed_dir}/final_dataset_with_gkx.parquet"
         gkx_monthly_df.to_parquet(gkx_monthly_path, index=False)
         coverage_df.to_csv(coverage_csv, index=False)
         coverage_df.to_json(coverage_json, orient="records", indent=2)
-        merged_df.to_parquet(gkx_daily_path, index=False)
-        schema = validate_gkx_schema(merged_df.columns.tolist())
-        print(f"GKX schema: {len(schema['present'])}/{len(schema['required'])} present")
+
+        schema = validate_gkx_schema(gkx_monthly_df.columns.tolist())
+        print(f"GKX schema (monthly): {len(schema['present'])}/{len(schema['required'])} present")
         if schema["missing"]:
-            print(f"Warning: Missing GKX columns (still expected as NaN fallback in some cases): {schema['missing']}")
+            print(f"Warning: Missing GKX columns in monthly output: {schema['missing']}")
+
         print(f"Saved GKX monthly characteristics: {gkx_monthly_path}")
         print(f"Saved coverage report: {coverage_csv}")
-        print(f"Saved GKX-attached daily dataset: {gkx_daily_path}")
+        # Original daily merge output kept for reference:
+        # gkx_daily_path = f"{processed_dir}/final_dataset_with_gkx.parquet"
+        # merged_df.to_parquet(gkx_daily_path, index=False)
+        # print(f"Saved GKX-attached daily dataset: {gkx_daily_path}")
 
     # ================================================================================
     # STEP 10: Add Cross-Sectional Features for Modeling
@@ -315,18 +405,45 @@ def run_full_pipeline(
         print("="*80)
 
         # Add cross-sectional features (no target creation — use target_builder separately)
+        if "merged_df" in locals():
+            del merged_df
+            gc.collect()
+
+        if "gkx_monthly_df" in locals():
+            monthly_model_input = gkx_monthly_df
+        else:
+            gkx_monthly_path = f"{processed_dir}/gkx_monthly.parquet"
+            if not os.path.exists(gkx_monthly_path):
+                raise FileNotFoundError(
+                    f"Missing monthly GKX input for cross_sectional: {gkx_monthly_path}. "
+                    f"Run with --steps gkx_features first."
+                )
+            monthly_model_input = pd.read_parquet(gkx_monthly_path)
+
+        sector_col = "sector" if "sector" in monthly_model_input.columns else None
+        if sector_col is None and "industry" in monthly_model_input.columns:
+            sector_col = "industry"
+
         modeling_df = add_all_cross_sectional_features(
-            merged_df,
-            sector_col=None,  # Set to column name if you have sector data
+            monthly_model_input,
+            sector_col=sector_col,
+            date_col="month_end",
         )
 
+        # Original daily cross-sectional path kept for reference:
+        # modeling_df = add_all_cross_sectional_features(
+        #     merged_df,
+        #     sector_col=None,
+        #     date_col="date",
+        # )
+
         # Save modeling dataset
-        modeling_path = f"{processed_dir}/modeling_dataset.parquet"
+        modeling_path = f"{processed_dir}/modeling_dataset_monthly.parquet"
         modeling_df.to_parquet(modeling_path, index=False)
 
         print(f"\nModeling dataset saved to: {modeling_path}")
         print(f"Shape: {modeling_df.shape}")
-        print(f"Features: {len([c for c in modeling_df.columns if c not in ['ticker', 'date']])}")
+        print(f"Features: {len([c for c in modeling_df.columns if c not in ['ticker', 'month_end']])}")
 
         print(f"\n{'='*80}")
         print(f"PIPELINE COMPLETE!")
@@ -334,7 +451,7 @@ def run_full_pipeline(
         print(f"\nData tag: {data_tag}")
         print(f"Modeling dataset ready at: {modeling_path}")
         print(f"Tickers: {modeling_df['ticker'].nunique()}")
-        print(f"Date range: {modeling_df['date'].min()} to {modeling_df['date'].max()}")
+        print(f"Date range: {modeling_df['month_end'].min()} to {modeling_df['month_end'].max()}")
         print(f"\nTo add targets, use:")
         print(f"  from src.utils.target_builder import build_targets")
         print(f"  df = pd.read_parquet('{modeling_path}')")
@@ -359,13 +476,13 @@ if __name__ == "__main__":
     parser.add_argument("--n_equities", type=int, default=1000, help="Number of top equities to include")
     parser.add_argument("--start_date", type=str, default="2020-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default="2025-02-09", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--steps", type=str, help="Comma-separated steps to run (default: all)")
+    parser.add_argument("--steps", type=str, help="Comma-separated steps to run. Options: universe, ohlcv, fundamentals, macro, news, embed, features, merge, gkx_features, cross_sectional (default: all)")
     parser.add_argument("--data_tag", type=str, default=None, help="Unique tag for this run (default: auto-generated timestamp)")
-    parser.add_argument("--exclude_etfs", action="store_true", help="Exclude ETFs from ranked universe")
+    parser.add_argument("--exclude_etfs", default=True, help="Exclude ETFs from ranked universe")
     parser.add_argument(
         "--benchmark_tickers",
         type=str,
-        default="SPY,QQQ,IWM",
+        default="SPY",
         help="Comma-separated tickers to force-include in universe for benchmarks",
     )
 
