@@ -50,6 +50,8 @@ XBRL_TAG_MAP = {
     # ... (same mapping as original) ...
     'revenue': [
         'Revenues',
+        'RevenuesNetOfInterestExpense',
+        'RevenueNetOfInterestExpense',
         'RevenueFromContractWithCustomerExcludingAssessedTax',
         'RevenueFromContractWithCustomerIncludingAssessedTax',
         'SalesRevenueNet',
@@ -65,71 +67,152 @@ XBRL_TAG_MAP = {
     ],
     'operating_income': [
         'OperatingIncomeLoss',
+        'IncomeLossFromOperations',
+        'OperatingProfitLoss',
         'ProfitLossFromOperatingActivities',
+        # Some filers, especially banks/energy/industrials, do not publish a
+        # standard operating-income concept. Use pre-tax continuing income as
+        # a lower-priority fallback rather than leaving the field blank.
+        'IncomeLossFromContinuingOperationsBeforeIncomeTaxes',
+        'IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest',
+        'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments',
     ],
     'gross_profit': ['GrossProfit'],
+    'cost_of_revenue': [
+        'CostOfRevenue',
+        'CostOfGoodsAndServicesSold',
+        'CostOfGoodsSold',
+        'CostOfSales',
+        'CostOfServices',
+        'CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization',
+        'CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization',
+        'CostOfServicesExcludingDepreciationDepletionAndAmortization',
+    ],
     'income_tax': [
         'IncomeTaxExpenseBenefit',
         'IncomeTaxExpenseContinuingOperations',
+        'IncomeTaxExpenseBenefitContinuingOperations',
     ],
     'interest_expense': [
         'InterestExpense',
+        'InterestExpenseNonoperating',
+        'InterestExpenseOperating',
         'InterestExpenseDebt',
+        'InterestExpenseDebtExcludingAmortization',
         'InterestAndDebtExpense',
+        'InterestCostsIncurred',
         'FinanceCosts',
         'InterestExpenseOnBorrowings',
+        'InterestExpenseBorrowings',
     ],
     'depreciation': [
         'DepreciationDepletionAndAmortization',
+        'DepreciationDepletionAndAmortizationExpense',
+        'DepreciationAmortizationAndAccretionNet',
         'DepreciationAndAmortization',
-        'Depreciation',
         'DepreciationAndAmortisationExpense',
         'AdjustmentsForDepreciationAndAmortisationExpense',
+        'OtherDepreciationAndAmortization',
+        'Depreciation',
     ],
     'operating_cash_flow': [
         'NetCashProvidedByUsedInOperatingActivities',
         'NetCashProvidedByUsedInOperatingActivitiesContinuingOperations',
         'CashFlowsFromUsedInOperatingActivities',
+        'CashFlowsFromUsedInOperatingActivitiesContinuingOperations',
+        'CashGeneratedFromUsedInOperatingActivities',
     ],
     'capex': [
         'PaymentsToAcquirePropertyPlantAndEquipment',
+        'PaymentsToAcquireProductiveAssets',
+        'PaymentsToAcquireOtherProductiveAssets',
+        'PaymentsToAcquireOtherPropertyPlantAndEquipment',
+        'PaymentsToAcquireMachineryAndEquipment',
+        'PaymentsToAcquireBuildings',
         'CapitalExpendituresIncurredButNotYetPaid',
+        'PropertyPlantAndEquipmentAdditions',
         'PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities',
     ],
     'sga_expense': [
         'SellingGeneralAndAdministrativeExpense',
-        'AdministrativeExpense',
+        'SellingGeneralAndAdministrativeExpenseExcludingDepreciationDepletionAndAmortization',
+        'OtherSellingGeneralAndAdministrativeExpense',
     ],
-    'research_and_development': ['ResearchAndDevelopmentExpense'],
+    'research_and_development': [
+        'ResearchAndDevelopmentExpense',
+        'ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost',
+    ],
     'employees': ['EntityNumberOfEmployees'],
     'total_assets': ['Assets'],
     'total_equity': [
         'StockholdersEquity',
         'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest',
+        'ShareholdersEquity',
         'EquityAttributableToOwnersOfParent',
+        'CommonStockholdersEquity',
+        'PartnersCapital',
+        'PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest',
         'Equity',
     ],
     'long_term_debt': [
-        'LongTermDebt',
         'LongTermDebtNoncurrent',
-        'LongTermDebtAndCapitalLeaseObligations',
+        'LongTermDebtAndCapitalLeaseObligationsNoncurrent',
+        'LongTermDebtAndFinanceLeaseObligationsNoncurrent',
+        'DebtAndFinanceLeaseObligationsNoncurrent',
+        'FinanceLeaseLiabilityNoncurrent',
+        'CapitalLeaseObligationsNoncurrent',
+        'LongtermBorrowings',
         'NoncurrentBorrowings',
+        'OtherLongTermDebtNoncurrent',
+        'OtherLongTermDebt',
+        'UnsecuredLongTermDebt',
+        'SecuredLongTermDebt',
+        'LongTermDebt',
+        'LongTermDebtAndCapitalLeaseObligations',
         'Borrowings',
     ],
     'short_term_debt': [
         'ShortTermBorrowings',
+        'ShorttermBorrowings',
         'DebtCurrent',
         'LongTermDebtCurrent',
         'CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings',
+        'CurrentPortionOfLongtermBorrowings',
+        'LongTermDebtAndCapitalLeaseObligationsCurrent',
+        'LongTermDebtAndFinanceLeaseObligationsCurrent',
+        'DebtAndFinanceLeaseObligationsCurrent',
+        'FinanceLeaseLiabilityCurrent',
+        'CapitalLeaseObligationsCurrent',
+        'NotesPayableCurrent',
+        'ConvertibleDebtCurrent',
+        'ConvertibleNotesPayableCurrent',
+        'OtherShortTermBorrowings',
+        'CommercialPaper',
+    ],
+    'total_debt_direct': [
+        'DebtLongtermAndShorttermCombinedAmount',
+        'DebtAndFinanceLeaseObligations',
+        'DebtAndCapitalLeaseObligations',
+        'DebtInstrumentCarryingAmount',
+        'LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities',
+        'LongTermDebtAndCapitalLeaseObligations',
+        'LongTermDebtAndFinanceLeaseObligations',
+        'FinanceLeaseLiability',
+        'CapitalLeaseObligations',
+        'Borrowings',
+        'NotesPayable',
+        'ConvertibleDebt',
     ],
     'total_cash': [
         'CashAndCashEquivalentsAtCarryingValue',
         'CashCashEquivalentsAndShortTermInvestments',
         'CashAndCashEquivalents',
+        'Cash',
+        'CashEquivalentsAtCarryingValue',
     ],
     'current_assets': ['AssetsCurrent', 'CurrentAssets'],
     'current_liabilities': ['LiabilitiesCurrent', 'CurrentLiabilities'],
-    'inventory': ['InventoryNet', 'Inventories'],
+    'inventory': ['InventoryNet', 'Inventories', 'InventoriesTotal', 'InventoryGross'],
     'shares_outstanding': [
         'EntityCommonStockSharesOutstanding',
         'CommonStockSharesOutstanding',
@@ -138,10 +221,26 @@ XBRL_TAG_MAP = {
     ],
     'receivables': [
         'AccountsReceivableNetCurrent',
+        'AccountsReceivableNet',
         'ReceivablesNetCurrent',
         'CurrentTradeReceivables',
+        'TradeReceivables',
+        'TradeAndOtherCurrentReceivables',
+        'AccountsAndOtherReceivablesNetCurrent',
+        'OtherReceivablesNetCurrent',
+        'AccountsReceivableGrossCurrent',
+        'AccountsAndNotesReceivableNet',
+        'AccountsNotesAndLoansReceivableNetCurrent',
+        'ContractWithCustomerReceivableAfterAllowanceForCreditLossCurrent',
+        'NontradeReceivablesCurrent',
     ],
-    'ppe': ['PropertyPlantAndEquipmentNet', 'PropertyPlantAndEquipment'],
+    'ppe': [
+        'PropertyPlantAndEquipmentNet',
+        'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+        'PropertyPlantAndEquipmentIncludingRightofuseAssets',
+        'PropertyPlantAndEquipment',
+        'PropertyPlantAndEquipmentGross',
+    ],
     'real_estate_assets': [
         'RealEstateNet',
         'RealEstateInvestmentPropertyNet',
@@ -149,10 +248,55 @@ XBRL_TAG_MAP = {
         'RealEstateInvestments',
         'InvestmentProperty',
     ],
-    'secured_debt': ['DebtInstrumentCollateralAmount', 'SecuredDebt'],
-    'convertible_debt': ['ConvertibleDebt'],
-    'taxes_payable': ['TaxesPayableCurrent'],
+    'secured_debt': ['DebtInstrumentCollateralAmount', 'SecuredDebt', 'SecuredDebtCurrent'],
+    'convertible_debt': ['ConvertibleDebt', 'ConvertibleDebtCurrent', 'ConvertibleDebtNoncurrent', 'ConvertibleNotesPayable'],
+    'taxes_payable': [
+        'TaxesPayableCurrent',
+        'AccruedIncomeTaxesCurrent',
+        'AccruedIncomeTaxesPayable',
+        'AccruedIncomeTaxes',
+        'IncomeTaxesPayable',
+        'CurrentTaxLiabilitiesCurrent',
+        'TaxesPayableCurrentAndNoncurrent',
+        'TaxesPayable',
+    ],
 }
+
+BANK_REVENUE_NET_INTEREST_TAGS = [
+    'InterestIncomeExpenseNet',
+    'InterestRevenueExpenseNet',
+    'InterestRevenueExpense',
+]
+BANK_REVENUE_NONINTEREST_TAGS = ['NoninterestIncome']
+
+SGA_GENERAL_ADMIN_TAGS = [
+    'GeneralAndAdministrativeExpense',
+    'AdministrativeExpense',
+    'OtherGeneralAndAdministrativeExpense',
+]
+SGA_SELLING_MARKETING_TAGS = [
+    'SellingAndMarketingExpense',
+    'SalesAndMarketingExpense',
+    'SellingExpense',
+    'MarketingExpense',
+    'MarketingAndAdvertisingExpense',
+    'AdvertisingExpense',
+]
+
+INVENTORY_COMPONENT_TAG_GROUPS = [
+    ['InventoryFinishedGoodsNetOfReserves', 'InventoryFinishedGoods'],
+    ['InventoryWorkInProcessNetOfReserves', 'InventoryWorkInProcess'],
+    [
+        'InventoryRawMaterialsNetOfReserves',
+        'InventoryRawMaterials',
+        'InventoryRawMaterialsAndSuppliesNetOfReserves',
+        'InventoryRawMaterialsAndSupplies',
+        'InventoryRawMaterialsAndPurchasedPartsNetOfReserves',
+    ],
+    ['InventoryPartsAndComponentsNetOfReserves'],
+    ['InventorySuppliesNetOfReserves', 'InventorySupplies', 'OtherInventorySupplies'],
+    ['OtherInventoryNetOfReserves', 'OtherInventory', 'OtherInventoriesSpareParts'],
+]
 
 INSTANT_FIELDS = {
     'total_assets', 'total_equity', 'long_term_debt', 'short_term_debt',
@@ -160,6 +304,8 @@ INSTANT_FIELDS = {
     'shares_outstanding', 'receivables', 'ppe', 'real_estate_assets',
     'secured_debt', 'convertible_debt', 'taxes_payable', 'employees',
 }
+PIT_CARRY_FORWARD_LIMIT_QUARTERS = 3
+PIT_CARRY_FORWARD_FIELDS = INSTANT_FIELDS | {'total_debt_direct'}
 DURATION_FIELDS = {
     'revenue', 'net_income', 'operating_income', 'gross_profit',
     'income_tax', 'interest_expense', 'depreciation', 'operating_cash_flow',
@@ -539,10 +685,8 @@ def _safe_div(numerator, denominator):
 
 # The _extract_quarterly_instant and _extract_quarterly_duration logic remains similar to original
 # but uses the slightly optimized _extract_fact_series above. We keep original semantics.
-def _extract_quarterly_instant(facts_data: dict, field_name: str) -> pd.DataFrame:
-    unit = "shares" if field_name in {"shares_outstanding"} else ("pure" if field_name in {"employees"} else "USD")
-    tags = XBRL_TAG_MAP.get(field_name, [])
-    raw = _extract_fact_series(facts_data, tags, unit=unit, form_filter=SEC_FORM_FILTER)
+def _extract_quarterly_instant_for_tags(facts_data: dict, xbrl_tags: List[str], unit: str = "USD") -> pd.DataFrame:
+    raw = _extract_fact_series(facts_data, xbrl_tags, unit=unit, form_filter=SEC_FORM_FILTER)
     if raw.empty:
         return pd.DataFrame(columns=["quarter_end", "value", "filed"])
     raw = _dedupe_prefer_original_earliest(raw, ["end"])
@@ -553,10 +697,19 @@ def _extract_quarterly_instant(facts_data: dict, field_name: str) -> pd.DataFram
     })
 
 
-def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFrame:
-    unit = "USD"
+def _extract_quarterly_instant(facts_data: dict, field_name: str) -> pd.DataFrame:
+    unit = "shares" if field_name in {"shares_outstanding"} else ("pure" if field_name in {"employees"} else "USD")
     tags = XBRL_TAG_MAP.get(field_name, [])
-    raw = _extract_fact_series(facts_data, tags, unit=unit, form_filter=SEC_FORM_FILTER)
+    series = _extract_quarterly_instant_for_tags(facts_data, tags, unit=unit)
+    if field_name == "inventory":
+        inventory_components = _derive_inventory_from_components(facts_data)
+        series = _merge_quarterly_series(series, inventory_components)
+    return series
+
+
+def _extract_quarterly_duration_for_tags(facts_data: dict, xbrl_tags: List[str]) -> pd.DataFrame:
+    unit = "USD"
+    raw = _extract_fact_series(facts_data, xbrl_tags, unit=unit, form_filter=SEC_FORM_FILTER)
     if raw.empty:
         return pd.DataFrame(columns=["quarter_end", "value", "filed"])
 
@@ -645,6 +798,172 @@ def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFra
     return result_df
 
 
+def _merge_quarterly_series(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    """Fill missing quarter_end rows in primary with fallback rows."""
+    if primary is None or primary.empty:
+        return fallback if fallback is not None else pd.DataFrame(columns=["quarter_end", "value", "filed"])
+    if fallback is None or fallback.empty:
+        return primary
+
+    left = primary.copy()
+    right = fallback.copy()
+    left["_rank"] = 0
+    right["_rank"] = 1
+    combined = pd.concat([left, right], ignore_index=True)
+    combined["quarter_end"] = pd.to_datetime(combined["quarter_end"], errors="coerce")
+    combined = combined.sort_values(["quarter_end", "_rank", "filed"])
+    combined = combined.drop_duplicates(subset=["quarter_end"], keep="first")
+    return combined.drop(columns=["_rank"], errors="ignore").reset_index(drop=True)
+
+
+def _combine_component_series(series_list: List[pd.DataFrame]) -> pd.DataFrame:
+    """Inner-join quarterly component series and sum values by quarter."""
+    cleaned = []
+    for idx, series in enumerate(series_list):
+        if series is None or series.empty:
+            return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+        s = series.copy()
+        s["quarter_end"] = pd.to_datetime(s["quarter_end"], errors="coerce")
+        s["filed"] = pd.to_datetime(s["filed"], errors="coerce")
+        s = s.dropna(subset=["quarter_end"]).drop_duplicates(subset=["quarter_end"], keep="first")
+        cleaned.append(s.rename(columns={"value": f"value_{idx}", "filed": f"filed_{idx}"})[
+            ["quarter_end", f"value_{idx}", f"filed_{idx}"]
+        ])
+
+    merged = cleaned[0]
+    for s in cleaned[1:]:
+        merged = merged.merge(s, on="quarter_end", how="inner")
+
+    value_cols = [c for c in merged.columns if c.startswith("value_")]
+    filed_cols = [c for c in merged.columns if c.startswith("filed_")]
+    if merged.empty or not value_cols:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    merged["value"] = merged[value_cols].sum(axis=1, min_count=len(value_cols))
+    merged["filed"] = merged[filed_cols].max(axis=1)
+    return merged[["quarter_end", "value", "filed"]].dropna(subset=["value"])
+
+
+def _clean_quarterly_series(series: pd.DataFrame) -> pd.DataFrame:
+    if series is None or series.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    out = series.copy()
+    out["quarter_end"] = pd.to_datetime(out["quarter_end"], errors="coerce")
+    out["filed"] = pd.to_datetime(out["filed"], errors="coerce")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["quarter_end", "value"])
+    out = out.sort_values(["quarter_end", "filed"]).drop_duplicates(subset=["quarter_end"], keep="first")
+    return out[["quarter_end", "value", "filed"]].reset_index(drop=True)
+
+
+def _sum_quarterly_component_series(series_list: List[pd.DataFrame], min_components: int = 1) -> pd.DataFrame:
+    """
+    Sum quarterly component concepts.
+
+    Unlike _combine_component_series, this allows sparse component coverage by
+    quarter while still requiring a minimum number of distinct component groups.
+    """
+    cleaned = []
+    for idx, series in enumerate(series_list):
+        s = _clean_quarterly_series(series)
+        if s.empty:
+            continue
+        s["_component_idx"] = idx
+        cleaned.append(s)
+
+    if len(cleaned) < min_components:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    stacked = pd.concat(cleaned, ignore_index=True)
+    grouped = (
+        stacked.groupby("quarter_end", as_index=False)
+        .agg(
+            value=("value", "sum"),
+            filed=("filed", "max"),
+            component_count=("_component_idx", "nunique"),
+        )
+    )
+    grouped = grouped[grouped["component_count"] >= min_components].copy()
+    if grouped.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+    return grouped[["quarter_end", "value", "filed"]].reset_index(drop=True)
+
+
+def _subtract_quarterly_series(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    """Subtract right values from left values for matching quarter_end rows."""
+    left_clean = _clean_quarterly_series(left)
+    right_clean = _clean_quarterly_series(right)
+    if left_clean.empty or right_clean.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    merged = left_clean.merge(right_clean, on="quarter_end", how="inner", suffixes=("_left", "_right"))
+    if merged.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    merged["value"] = merged["value_left"] - merged["value_right"]
+    merged["filed"] = merged[["filed_left", "filed_right"]].max(axis=1)
+    return merged[["quarter_end", "value", "filed"]].dropna(subset=["value"]).reset_index(drop=True)
+
+
+def _derive_bank_revenue_from_components(facts_data: dict) -> pd.DataFrame:
+    """
+    Derive financial-company revenue when SEC does not expose a quarterly
+    total-revenue concept: net interest income + noninterest income.
+    """
+    net_interest = pd.DataFrame(columns=["quarter_end", "value", "filed"])
+    for tags in BANK_REVENUE_NET_INTEREST_TAGS:
+        series = _extract_quarterly_duration_for_tags(facts_data, [tags])
+        net_interest = _merge_quarterly_series(net_interest, series)
+
+    noninterest = _extract_quarterly_duration_for_tags(facts_data, BANK_REVENUE_NONINTEREST_TAGS)
+    return _combine_component_series([net_interest, noninterest])
+
+
+def _derive_gross_profit_from_revenue_and_cost(facts_data: dict) -> pd.DataFrame:
+    """Derive gross profit where only revenue and cost of revenue are filed."""
+    revenue = _extract_quarterly_duration(facts_data, "revenue")
+    cost_of_revenue = _extract_quarterly_duration_for_tags(facts_data, XBRL_TAG_MAP.get("cost_of_revenue", []))
+    return _subtract_quarterly_series(revenue, cost_of_revenue)
+
+
+def _derive_sga_from_components(facts_data: dict) -> pd.DataFrame:
+    """Derive SG&A from separately-filed G&A and selling/marketing concepts."""
+    general_admin = _extract_quarterly_duration_for_tags(facts_data, SGA_GENERAL_ADMIN_TAGS)
+    selling_marketing = _extract_quarterly_duration_for_tags(facts_data, SGA_SELLING_MARKETING_TAGS)
+    return _sum_quarterly_component_series([general_admin, selling_marketing], min_components=2)
+
+
+def _derive_inventory_from_components(facts_data: dict) -> pd.DataFrame:
+    """
+    Derive inventory from finished goods, WIP, raw materials, supplies, and
+    other inventory component groups when a total inventory concept is absent.
+    """
+    component_series = []
+    for tag_group in INVENTORY_COMPONENT_TAG_GROUPS:
+        component_series.append(_extract_quarterly_instant_for_tags(facts_data, tag_group, unit="USD"))
+    return _sum_quarterly_component_series(component_series, min_components=2)
+
+
+def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFrame:
+    tags = XBRL_TAG_MAP.get(field_name, [])
+    series = _extract_quarterly_duration_for_tags(facts_data, tags)
+    if field_name == "revenue":
+        bank_revenue = _derive_bank_revenue_from_components(facts_data)
+        series = _merge_quarterly_series(series, bank_revenue)
+    elif field_name == "gross_profit":
+        derived_gross_profit = _derive_gross_profit_from_revenue_and_cost(facts_data)
+        series = _merge_quarterly_series(series, derived_gross_profit)
+    elif field_name == "sga_expense":
+        derived_sga = _derive_sga_from_components(facts_data)
+        series = _merge_quarterly_series(series, derived_sga)
+    elif field_name == "depreciation" and not series.empty:
+        series = series.copy()
+        series.loc[pd.to_numeric(series["value"], errors="coerce") < 0, "value"] = np.nan
+        series = series.dropna(subset=["value"]).reset_index(drop=True)
+    return series
+
+
 def _snap_to_nearest(target_date, reference_dates, max_days=45):
     best = None
     best_dist = max_days + 1
@@ -730,6 +1049,10 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
         if not series.empty:
             instant_series[field] = series
 
+    total_debt_direct = _extract_quarterly_instant(facts_data, "total_debt_direct")
+    if not total_debt_direct.empty:
+        instant_series["total_debt_direct"] = total_debt_direct
+
     if not duration_series and not instant_series:
         return None
 
@@ -791,12 +1114,24 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
         if f not in df.columns:
             df[f] = np.nan
 
+    for field in sorted(PIT_CARRY_FORWARD_FIELDS):
+        if field in df.columns:
+            df[field] = df[field].ffill(limit=PIT_CARRY_FORWARD_LIMIT_QUARTERS)
+
     # aggregate total_debt and compute ebitda & ratios
+    # Prefer synthesized current + noncurrent debt. If neither component exists,
+    # fall back to a direct total debt concept rather than leaving the quarter blank.
     lt = df.get("long_term_debt", pd.Series(np.nan, index=df.index))
     st = df.get("short_term_debt", pd.Series(np.nan, index=df.index))
-    df["total_debt"] = lt.fillna(0) + st.fillna(0)
-    df.loc[lt.isna() & st.isna(), "total_debt"] = np.nan
-    df = df.drop(columns=["long_term_debt", "short_term_debt"], errors="ignore")
+    direct_debt = df.get("total_debt_direct", pd.Series(np.nan, index=df.index))
+    lt_pit = lt.ffill(limit=PIT_CARRY_FORWARD_LIMIT_QUARTERS)
+    st_pit = st.ffill(limit=PIT_CARRY_FORWARD_LIMIT_QUARTERS)
+    direct_debt_pit = direct_debt.ffill(limit=PIT_CARRY_FORWARD_LIMIT_QUARTERS)
+    debt_from_components = lt_pit.fillna(0) + st_pit.fillna(0)
+    no_debt_components = lt_pit.isna() & st_pit.isna()
+    df["total_debt"] = debt_from_components
+    df.loc[no_debt_components, "total_debt"] = direct_debt_pit.loc[no_debt_components]
+    df = df.drop(columns=["long_term_debt", "short_term_debt", "total_debt_direct"], errors="ignore")
 
     ebitda_components = ["net_income", "income_tax", "interest_expense", "depreciation"]
     if all(c in df.columns for c in ebitda_components):
