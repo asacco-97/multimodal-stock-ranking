@@ -18,7 +18,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
@@ -31,10 +31,12 @@ SEC_USER_AGENT = "AnthonySacco amsacco97@gmail.com"
 
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_RATE_LIMIT_DELAY = 0.2  # recommended default (10 req/s -> 0.1s); use conservative 0.2s
 
 # SEC filing form types to include (domestic + foreign filers)
 SEC_FORM_FILTER = ['10-Q', '10-K', '10-Q/A', '10-K/A', '20-F', '20-F/A', '6-K', '6-K/A']
+SEC_MAX_REPORT_LAG_DAYS = 200
 
 # Keep your XBRL_TAG_MAP, INSTANT_FIELDS, DURATION_FIELDS, MONETARY_COLUMNS
 # (omitted here for brevity in this comment — they are identical to your original map)
@@ -178,10 +180,12 @@ MONETARY_COLUMNS = {
 BASE_CACHE_DIR = Path(os.path.dirname(__file__)).parent.parent / "data" / "cache"
 CIK_CACHE_PATH = BASE_CACHE_DIR / "sec_cik_mapping.json"
 COMPANYFACTS_CACHE_DIR = BASE_CACHE_DIR / "sec_companyfacts"
+SUBMISSIONS_CACHE_DIR = BASE_CACHE_DIR / "sec_submissions"
 FX_CACHE_DIR = BASE_CACHE_DIR / "fx_rates"
 
 # Ensure dirs
 COMPANYFACTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+SUBMISSIONS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 FX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 BASE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -286,7 +290,169 @@ def _fetch_company_facts_cached(cik: str, refresh_cache: bool = False) -> Option
         return None
 
 
+def _default_sec_metadata() -> Dict[str, Any]:
+    return {"sic": np.nan, "sic2": np.nan}
+
+
+def _parse_sic_codes(raw_sic: Any) -> Dict[str, Any]:
+    if raw_sic is None or (isinstance(raw_sic, float) and np.isnan(raw_sic)):
+        return {"sic": np.nan, "sic2": np.nan}
+
+    digits = "".join(ch for ch in str(raw_sic) if ch.isdigit())
+    if not digits:
+        return {"sic": np.nan, "sic2": np.nan}
+
+    sic = int(digits)
+    sic2 = int(digits[:2]) if len(digits) >= 2 else np.nan
+    return {"sic": sic, "sic2": sic2}
+
+
+def _fetch_submissions_metadata_cached(cik: str, refresh_cache: bool = False) -> Dict[str, Any]:
+    """
+    Fetch SEC submissions metadata (SIC and description) and cache per CIK.
+    """
+    if not cik:
+        return _default_sec_metadata()
+
+    cache_file = SUBMISSIONS_CACHE_DIR / f"CIK{cik}.json"
+    payload = None
+
+    if cache_file.exists() and not refresh_cache:
+        try:
+            with open(cache_file, "r") as f:
+                payload = json.load(f)
+        except Exception:
+            payload = None
+
+    if payload is None:
+        headers = {"User-Agent": SEC_USER_AGENT}
+        url = SEC_SUBMISSIONS_URL.format(cik=cik)
+        try:
+            resp = _polite_get(url, headers=headers)
+            if resp is not None and resp.status_code != 404:
+                payload = resp.json()
+                with open(cache_file, "w") as f:
+                    json.dump(payload, f)
+        except Exception:
+            payload = None
+
+    if not payload:
+        return _default_sec_metadata()
+
+    sic_meta = _parse_sic_codes(payload.get("sic"))
+    return {
+        "sic": sic_meta["sic"],
+        "sic2": sic_meta["sic2"],
+    }
+
+
+def _fetch_sec_payloads_cached(cik: str, refresh_cache: bool = False) -> Dict[str, Any]:
+    """
+    Fetch all SEC payloads needed by this pipeline for one CIK.
+    """
+    return {
+        "facts": _fetch_company_facts_cached(cik, refresh_cache=refresh_cache),
+        "meta": _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_cache),
+    }
+
+
 # -------------------- XBRL extraction (mostly preserved) --------------------
+def _select_unit_entries(units: Dict[str, Any], requested_unit: str):
+    """
+    Pick entries for the requested unit without crossing unit families.
+
+    SEC companyfacts may expose several units for one concept. A monetary
+    request should never fall back to shares-per-unit data, and vice versa.
+    """
+    if not units:
+        return None, None
+
+    entries = units.get(requested_unit)
+    if entries:
+        return requested_unit, entries
+
+    if requested_unit == "USD":
+        for unit_key, unit_entries in units.items():
+            unit_l = str(unit_key).lower()
+            if unit_l in {"shares", "pure"} or "shares" in unit_l:
+                continue
+            if unit_entries:
+                return unit_key, unit_entries
+    elif requested_unit == "shares":
+        entries = units.get("shares")
+        if entries:
+            return "shares", entries
+    elif requested_unit == "pure":
+        entries = units.get("pure")
+        if entries:
+            return "pure", entries
+
+    return None, None
+
+
+def _dedupe_prefer_original_earliest(df: pd.DataFrame, subset: List[str]) -> pd.DataFrame:
+    """
+    Deduplicate SEC fact rows for point-in-time use.
+
+    Companyfacts repeats old comparative periods in later filings. Keeping the
+    latest duplicate pushes old quarters into the future. Prefer the original
+    non-amended filing, then the earliest filed date, preserving XBRL tag order.
+    """
+    if df.empty:
+        return df
+
+    work = df.copy()
+    form = work.get("form", pd.Series("", index=work.index)).fillna("").astype(str)
+    work["_amended_rank"] = form.str.endswith("/A").astype(int)
+    if "_tag_rank" not in work.columns:
+        work["_tag_rank"] = 0
+    if "_duration_rank" not in work.columns:
+        work["_duration_rank"] = 0
+
+    sort_cols = ["_amended_rank", "filed", "_duration_rank", "_tag_rank", "accn"]
+    sort_cols = [c for c in sort_cols if c in work.columns]
+    work = work.sort_values(sort_cols, kind="mergesort")
+    work = work.drop_duplicates(subset=subset, keep="first")
+    return work.drop(columns=["_amended_rank", "_duration_rank"], errors="ignore").reset_index(drop=True)
+
+
+def _choose_report_date(quarter_end, filing_dates: List[Any]):
+    """Use the first valid filing on/after quarter end as the quarter availability date."""
+    qe = pd.to_datetime(quarter_end, errors="coerce")
+    candidates = pd.to_datetime(pd.Series(filing_dates), errors="coerce").dropna()
+    if candidates.empty:
+        return pd.NaT
+    if pd.notna(qe):
+        after_qe = candidates[candidates >= qe]
+        if not after_qe.empty:
+            return after_qe.min()
+    return candidates.min()
+
+
+def _filter_quarter_date_quality(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove quarter rows that cannot be aligned point-in-time.
+
+    Very old companyfacts rows sometimes only appear as later comparative
+    periods, not as their original filing. Keeping those rows creates stale
+    quarter/report-date pairings, so exclude them from production output.
+    """
+    if df.empty:
+        return df
+
+    quarter_end = pd.to_datetime(df["quarter_end_date"], errors="coerce")
+    report_date = pd.to_datetime(df["report_date"], errors="coerce")
+    lag_days = (report_date - quarter_end).dt.days
+
+    valid = (
+        quarter_end.notna()
+        & report_date.notna()
+        & (lag_days >= 0)
+        & (lag_days <= SEC_MAX_REPORT_LAG_DAYS)
+    )
+    return df.loc[valid].reset_index(drop=True)
+
+
 def _extract_fact_series(
     facts_data: dict,
     xbrl_tags: List[str],
@@ -294,7 +460,7 @@ def _extract_fact_series(
     form_filter: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Union entries from all matching tags and deduplicate by (end, start) keeping latest filed.
+    Union entries from all matching tags and deduplicate by period for PIT use.
     Returns columns: [val, end, start (opt), filed, form, fp, fy, accn]
     """
     if not facts_data or "facts" not in facts_data:
@@ -302,6 +468,7 @@ def _extract_fact_series(
 
     facts = facts_data.get("facts", {})
     namespaces = [facts.get("us-gaap", {}), facts.get("ifrs-full", {}), facts.get("dei", {})]
+    tag_rank = {tag: rank for rank, tag in enumerate(xbrl_tags)}
 
     rows = []
     for tag in xbrl_tags:
@@ -315,13 +482,7 @@ def _extract_fact_series(
             continue
 
         units = tag_obj.get("units", {})
-        entries = units.get(unit) or units.get("shares") or units.get("USD/shares")
-        if not entries and unit == "USD":
-            # fallback to any currency unit
-            for unit_key, entries_v in units.items():
-                if unit_key not in ("shares", "USD/shares", "pure"):
-                    entries = entries_v
-                    break
+        unit_key, entries = _select_unit_entries(units, unit)
         if not entries:
             continue
 
@@ -336,7 +497,10 @@ def _extract_fact_series(
                 "fp": e.get("fp"),
                 "fy": e.get("fy"),
                 "accn": e.get("accn"),
+                "frame": e.get("frame"),
+                "unit": unit_key,
                 "_tag": tag,
+                "_tag_rank": tag_rank.get(tag, len(tag_rank)),
             })
 
     if not rows:
@@ -354,12 +518,13 @@ def _extract_fact_series(
     if form_filter and "form" in df.columns:
         df = df[df["form"].isin(form_filter)].copy()
 
-    # deduplicate by (end,start) keeping latest 'filed'
+    # Deduplicate by period. SEC companyfacts repeats old comparative values in
+    # newer filings; for PIT alignment, keep the first original filing.
     dedup_cols = ["end"]
     if "start" in df.columns and df["start"].notna().any():
         dedup_cols.append("start")
 
-    df = df.sort_values("filed").drop_duplicates(subset=dedup_cols, keep="last").reset_index(drop=True)
+    df = _dedupe_prefer_original_earliest(df, dedup_cols)
     return df
 
 
@@ -380,7 +545,7 @@ def _extract_quarterly_instant(facts_data: dict, field_name: str) -> pd.DataFram
     raw = _extract_fact_series(facts_data, tags, unit=unit, form_filter=SEC_FORM_FILTER)
     if raw.empty:
         return pd.DataFrame(columns=["quarter_end", "value", "filed"])
-    raw = raw.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
+    raw = _dedupe_prefer_original_earliest(raw, ["end"])
     return pd.DataFrame({
         "quarter_end": raw["end"].values,
         "value": raw["val"].values,
@@ -404,27 +569,32 @@ def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFra
 
             # Step 1: single-quarter entries
             single_q = qdata[(qdata["duration_days"] >= 60) & (qdata["duration_days"] <= 120)].copy()
-            single_q = single_q.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
+            single_q["_duration_rank"] = (single_q["duration_days"] - 90).abs()
+            single_q = _dedupe_prefer_original_earliest(single_q, ["end"])
             for _, row in single_q.iterrows():
                 results[row["end"]] = (row["val"], row["filed"])
 
             # Step 2: fill gaps from cumulative YTD entries by differencing
             cumulative = qdata[(qdata["duration_days"] > 120) & (qdata["duration_days"] < 400)].copy()
             if not cumulative.empty:
-                cumulative = cumulative.sort_values(["end", "filed"]).drop_duplicates(subset=["end"], keep="last")
+                cumulative = _dedupe_prefer_original_earliest(cumulative, ["start", "end"])
                 # Group by fiscal-year START date
                 for fy_start in cumulative["start"].dropna().unique():
                     fy_cums = cumulative[cumulative["start"] == fy_start].sort_values("end")
-                    prev_val = 0.0
-                    # see if we have a Q1 single-quarter val in results for this fy
+                    prev_val = None
+                    # See if we have a Q1 single-quarter value. If not, do not
+                    # treat the first YTD cumulative value as a single quarter.
                     for qe, (qv, _) in list(results.items()):
                         if fy_start <= qe <= fy_cums["end"].max():
                             days_from_start = (qe - fy_start).days
-                            if days_from_start < 120:
+                            if 60 <= days_from_start <= 120:
                                 prev_val = qv
                                 break
                     for _, crow in fy_cums.iterrows():
                         if crow["end"] in results:
+                            prev_val = crow["val"]
+                            continue
+                        if prev_val is None:
                             prev_val = crow["val"]
                             continue
                         q_val = crow["val"] - prev_val
@@ -447,9 +617,10 @@ def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFra
         fy_rows = annual[annual["fp"] == "FY"]
 
     if not fy_rows.empty:
-        fy_rows = fy_rows.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
+        fy_rows = _dedupe_prefer_original_earliest(fy_rows, ["start", "end"])
         for _, fy_row in fy_rows.iterrows():
             fy_end = fy_row["end"]
+            fy_start = fy_row.get("start", pd.NaT)
             fy_val = fy_row["val"]
             fy_filed = fy_row["filed"]
             if fy_end in results:
@@ -457,6 +628,8 @@ def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFra
             q_sum = 0.0
             q_count = 0
             for qe, (qv, _) in results.items():
+                if pd.notna(fy_start) and not (fy_start <= qe < fy_end):
+                    continue
                 days_before = (fy_end - qe).days
                 if 0 < days_before <= 300:
                     q_sum += qv
@@ -569,8 +742,7 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
             if pd.isna(qe):
                 continue
             master_quarters.add(qe)
-            if qe not in filing_dates or row["filed"] > filing_dates[qe]:
-                filing_dates[qe] = row["filed"]
+            filing_dates.setdefault(qe, []).append(row["filed"])
 
     # fallback to instant fields if no duration
     if not master_quarters:
@@ -581,8 +753,7 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
                     continue
                 if qe.day >= 25 or qe.day <= 5:
                     master_quarters.add(qe)
-                    if qe not in filing_dates or row["filed"] > filing_dates[qe]:
-                        filing_dates[qe] = row["filed"]
+                    filing_dates.setdefault(qe, []).append(row["filed"])
 
     if not master_quarters:
         return None
@@ -593,12 +764,12 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
     for field, series in instant_series.items():
         for _, row in series.iterrows():
             snapped = _snap_to_nearest(row["quarter_end"], sorted_quarters, max_days=45)
-            if snapped is not None and (snapped not in filing_dates or row["filed"] > filing_dates[snapped]):
-                filing_dates[snapped] = row["filed"]
+            if snapped is not None:
+                filing_dates.setdefault(snapped, []).append(row["filed"])
 
     rows = []
     for qe in sorted_quarters:
-        row = {"quarter_end_date": qe, "report_date": filing_dates.get(qe, pd.NaT)}
+        row = {"quarter_end_date": qe, "report_date": _choose_report_date(qe, filing_dates.get(qe, []))}
         for field, series in duration_series.items():
             match = series[series["quarter_end"] == qe]
             row[field] = (match.iloc[0]["value"] if not match.empty else np.nan)
@@ -610,6 +781,9 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
         rows.append(row)
 
     df = pd.DataFrame(rows)
+    df = _filter_quarter_date_quality(df)
+    if df.empty:
+        return None
 
     # ensure all expected fields exist
     expected_fields = sorted(list(INSTANT_FIELDS | DURATION_FIELDS))
@@ -681,6 +855,7 @@ def fetch_quarterly_fundamentals(ticker: str, reporting_lag_days: int = 45, refr
             return None
 
         facts = _fetch_company_facts_cached(cik, refresh_cache=refresh_cache)
+        sec_meta = _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_cache)
         if facts is None:
             print(f"  No EDGAR data for {ticker} (CIK {cik})")
             return None
@@ -691,6 +866,8 @@ def fetch_quarterly_fundamentals(ticker: str, reporting_lag_days: int = 45, refr
             return None
 
         df["ticker"] = ticker.upper()
+        df["sic"] = sec_meta.get("sic", np.nan)
+        df["sic2"] = sec_meta.get("sic2", np.nan)
         df = df.sort_values("quarter_end_date").reset_index(drop=True)
 
         # growth metrics
@@ -771,20 +948,26 @@ def fetch_all_quarterly_fundamentals(
     print(f"Fetching quarterly fundamentals from SEC EDGAR for {len(tickers)} tickers...")
     print(f"Using actual SEC filing dates (no estimated lag). Workers={max_workers}")
 
-    fetch_partial = partial(_fetch_company_facts_cached, refresh_cache=refresh_cache)
+    fetch_partial = partial(_fetch_sec_payloads_cached, refresh_cache=refresh_cache)
+    cik_map = _load_cik_mapping()
 
-    # We'll fetch companyfacts (cached) in parallel but process sequentially building DataFrames.
-    # Doing both in parallel is possible but memory-heavy; this strikes a balance.
+    # Fetch SEC payloads (companyfacts + submissions metadata) in parallel, then
+    # process sequentially to build per-ticker DataFrames.
     with ThreadPoolExecutor(max_workers=max_workers) as exe:
-        futures = {exe.submit(fetch_partial, _load_cik_mapping().get(t)): t for t in tickers}
+        futures = {}
+        for tick in tickers:
+            cik = cik_map.get(tick)
+            if not cik:
+                failed.append(tick)
+                continue
+            futures[exe.submit(fetch_partial, cik)] = (tick, cik)
+
         for fut in tqdm(as_completed(futures), total=len(futures), desc="EDGAR fetch"):
-            tick = futures[fut]
+            tick, cik = futures[fut]
             try:
-                cik = _load_cik_mapping().get(tick)
-                facts = fut.result()
-                if cik is None:
-                    failed.append(tick)
-                    continue
+                payload = fut.result()
+                facts = (payload or {}).get("facts")
+                sec_meta = (payload or {}).get("meta") or _default_sec_metadata()
                 if facts is None:
                     failed.append(tick)
                     continue
@@ -795,6 +978,8 @@ def fetch_all_quarterly_fundamentals(
                         failed.append(tick)
                         continue
                     df["ticker"] = tick
+                    df["sic"] = sec_meta.get("sic", np.nan)
+                    df["sic2"] = sec_meta.get("sic2", np.nan)
                     df = df.sort_values("quarter_end_date").reset_index(drop=True)
                     # compute growth columns (same as single-ticker function)
                     revenue = df["revenue"] if "revenue" in df.columns else pd.Series(np.nan, index=df.index)
@@ -884,26 +1069,87 @@ def merge_fundamentals_point_in_time(price_df: pd.DataFrame,
     return merged
 
 
+def _load_tickers_from_file(path: str) -> List[str]:
+    """Load tickers from JSON list/dict or CSV with a ticker column."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Universe file not found: {path}")
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, "r") as f:
+            payload = json.load(f)
+        if isinstance(payload, list):
+            tickers = payload
+        elif isinstance(payload, dict) and "tickers" in payload:
+            tickers = payload["tickers"]
+        else:
+            raise ValueError(f"Unsupported JSON universe format in {path}")
+    elif ext == ".csv":
+        df = pd.read_csv(path)
+        if "ticker" not in df.columns:
+            raise ValueError(f"CSV universe file must include a 'ticker' column: {path}")
+        tickers = df["ticker"].tolist()
+    else:
+        raise ValueError(f"Unsupported universe file extension: {path}")
+
+    return [str(t).strip().upper().replace(".", "-") for t in tickers if str(t).strip()]
+
+
+def _resolve_tickers(tickers_arg: Optional[str], universe_file: Optional[str]) -> List[str]:
+    if universe_file:
+        return _load_tickers_from_file(universe_file)
+    if not tickers_arg:
+        raise ValueError("One of --tickers or --universe_file is required.")
+    if tickers_arg.endswith(".json") or tickers_arg.endswith(".csv"):
+        return _load_tickers_from_file(tickers_arg)
+    return [t.strip().upper().replace(".", "-") for t in tickers_arg.split(",") if t.strip()]
+
+
+def _filter_by_date_window(df: pd.DataFrame, start_date: Optional[str], end_date: Optional[str]) -> pd.DataFrame:
+    """
+    Clip rows to requested date window while preserving enough history
+    for point-in-time merges near the start boundary.
+    """
+    if df.empty:
+        return df
+
+    out = df.copy()
+    out["quarter_end_date"] = pd.to_datetime(out["quarter_end_date"], errors="coerce")
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce")
+
+    if end_date:
+        end_ts = pd.Timestamp(end_date)
+        out = out[out["report_date"] <= end_ts]
+    if start_date:
+        # Keep one year prior to start so early-window joins still have history.
+        start_with_buffer = pd.Timestamp(start_date) - pd.DateOffset(years=1)
+        out = out[out["quarter_end_date"] >= start_with_buffer]
+
+    out["quarter_end_date"] = out["quarter_end_date"].dt.strftime("%Y-%m-%d")
+    out["report_date"] = out["report_date"].dt.strftime("%Y-%m-%d")
+    return out.reset_index(drop=True)
+
+
 # If run as script, keep compatible CLI like original
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Fetch quarterly fundamentals from SEC EDGAR (refactor)")
-    parser.add_argument("--tickers", type=str, required=True,
-                        help="Comma-separated tickers OR path to JSON file")
-    parser.add_argument("--data_tag", type=str, default=None,
-                        help="Data tag for output directory (default: auto timestamp)")
+    parser.add_argument("--tickers", type=str, default=None,
+                        help="Comma-separated tickers OR path to JSON/CSV file")
+    parser.add_argument("--universe_file", type=str, default=None,
+                        help="Path to JSON/CSV universe file")
+    parser.add_argument("--start_date", type=str, default=None, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end_date", type=str, default=None, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--data_tag", type=str, default=None, help="Run tag for output folder (default: timestamp)")
+    parser.add_argument("--raw_root", type=str, default="data/raw", help="Root raw data directory")
+    parser.add_argument("--save_dir", type=str, default=None, help="Override output directory")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers (keep small for SEC)")
     parser.add_argument("--refresh_cache", action="store_true", help="Refresh SEC companyfacts cache")
     args = parser.parse_args()
 
     data_tag = args.data_tag or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    save_dir = f"data/raw/{data_tag}/fundamentals_quarterly/"
-    if args.tickers.endswith(".json") and os.path.exists(args.tickers):
-        with open(args.tickers, "r") as f:
-            data = json.load(f)
-            tickers = data if isinstance(data, list) else data.get("tickers", [])
-    else:
-        tickers = args.tickers.split(",")
+    save_dir = args.save_dir or os.path.join(args.raw_root, data_tag, "fundamentals_quarterly")
+    tickers = _resolve_tickers(args.tickers, args.universe_file)
 
     print(f"Fetching quarterly fundamentals for {len(tickers)} tickers...")
     print(f"Data tag: {data_tag}")
@@ -912,6 +1158,15 @@ if __name__ == "__main__":
     fundamentals_df = fetch_all_quarterly_fundamentals(
         tickers, save_dir=save_dir, max_workers=args.workers, refresh_cache=args.refresh_cache
     )
+    fundamentals_df = _filter_by_date_window(
+        fundamentals_df,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
+    if not fundamentals_df.empty:
+        output_path = os.path.join(save_dir, "quarterly_fundamentals.parquet")
+        fundamentals_df.to_parquet(output_path, index=False)
+        print(f"Filtered output saved to: {output_path}")
 
     print("\n=== Sample Data ===")
     print(fundamentals_df.head(10))

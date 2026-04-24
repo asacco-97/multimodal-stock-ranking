@@ -11,6 +11,42 @@ from typing import List, Optional
 from time import sleep
 from datetime import datetime
 
+
+def _load_tickers_from_file(path: str) -> List[str]:
+    """Load tickers from JSON list/dict or CSV with a ticker column."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Universe file not found: {path}")
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, "r") as f:
+            payload = json.load(f)
+        if isinstance(payload, list):
+            tickers = payload
+        elif isinstance(payload, dict) and "tickers" in payload:
+            tickers = payload["tickers"]
+        else:
+            raise ValueError(f"Unsupported JSON universe format in {path}")
+    elif ext == ".csv":
+        df = pd.read_csv(path)
+        if "ticker" not in df.columns:
+            raise ValueError(f"CSV universe file must include a 'ticker' column: {path}")
+        tickers = df["ticker"].tolist()
+    else:
+        raise ValueError(f"Unsupported universe file extension: {path}")
+
+    return [str(t).strip().upper().replace(".", "-") for t in tickers if str(t).strip()]
+
+
+def _resolve_tickers(tickers_arg: Optional[str], universe_file: Optional[str]) -> List[str]:
+    if universe_file:
+        return _load_tickers_from_file(universe_file)
+    if not tickers_arg:
+        raise ValueError("One of --tickers or --universe_file is required.")
+    if tickers_arg.endswith(".json") or tickers_arg.endswith(".csv"):
+        return _load_tickers_from_file(tickers_arg)
+    return [t.strip().upper().replace(".", "-") for t in tickers_arg.split(",") if t.strip()]
+
 def fetch_ohlcv_single(ticker: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
     """
     Fetch OHLCV data for a single ticker.
@@ -197,28 +233,27 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Fetch OHLCV data for equities")
-    parser.add_argument("--tickers", type=str, help="Comma-separated list of tickers OR path to JSON file")
+    parser.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers OR path to JSON/CSV file")
+    parser.add_argument("--universe_file", type=str, default=None, help="Path to JSON/CSV universe file")
     parser.add_argument("--start_date", type=str, required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--save_dir", type=str, default="data/raw/ohlcv/", help="Directory to save data")
+    parser.add_argument("--data_tag", type=str, default=None, help="Run tag for output folder (default: timestamp)")
+    parser.add_argument("--raw_root", type=str, default="data/raw", help="Root raw data directory")
+    parser.add_argument("--save_dir", type=str, default=None, help="Override output directory")
     parser.add_argument("--batch_size", type=int, default=100, help="Save progress every N tickers")
     parser.add_argument("--no_resume", action="store_true", help="Start fresh (ignore previous progress)")
 
     args = parser.parse_args()
-
-    # Parse tickers
-    if args.tickers.endswith('.json'):
-        with open(args.tickers, 'r') as f:
-            tickers = json.load(f)
-    else:
-        tickers = args.tickers.split(',')
+    data_tag = args.data_tag or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    save_dir = args.save_dir or os.path.join(args.raw_root, data_tag, "ohlcv")
+    tickers = _resolve_tickers(args.tickers, args.universe_file)
 
     # Fetch data
     df = fetch_ohlcv_batch(
         tickers,
         args.start_date,
         args.end_date,
-        save_dir=args.save_dir,
+        save_dir=save_dir,
         batch_size=args.batch_size,
         resume=not args.no_resume
     )

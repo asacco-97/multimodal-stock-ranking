@@ -218,22 +218,28 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Fetch macroeconomic data from FRED")
+    parser.add_argument("--universe_file", type=str, default=None,
+                        help="Unused for macro, accepted for CLI consistency")
     parser.add_argument("--start_date", type=str, required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--save_dir", type=str, default="data/raw/macro/", help="Directory to save data")
+    parser.add_argument("--data_tag", type=str, default=None, help="Run tag for output folder (default: timestamp)")
+    parser.add_argument("--raw_root", type=str, default="data/raw", help="Root raw data directory")
+    parser.add_argument("--save_dir", type=str, default=None, help="Override output directory")
     parser.add_argument("--derive_features", action="store_true", help="Create derived features")
 
     args = parser.parse_args()
+    data_tag = args.data_tag or datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    save_dir = args.save_dir or os.path.join(args.raw_root, data_tag, "macro")
 
     # Fetch macro data
-    macro_df = fetch_all_macro_indicators(args.start_date, args.end_date, save_dir=args.save_dir)
+    macro_df = fetch_all_macro_indicators(args.start_date, args.end_date, save_dir=save_dir)
 
     # Optionally create derived features
     if args.derive_features:
         print("\nCreating derived macro features...")
         macro_df = create_macro_derived_features(macro_df)
 
-        derived_path = os.path.join(args.save_dir, 'macro_indicators_derived.csv')
+        derived_path = os.path.join(save_dir, 'macro_indicators_derived.csv')
         macro_df.to_csv(derived_path, index=False)
         print(f"Saved derived features to: {derived_path}")
 
