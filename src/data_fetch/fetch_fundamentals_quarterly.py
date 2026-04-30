@@ -37,6 +37,7 @@ SEC_RATE_LIMIT_DELAY = 0.2  # recommended default (10 req/s -> 0.1s); use conser
 # SEC filing form types to include (domestic + foreign filers)
 SEC_FORM_FILTER = ['10-Q', '10-K', '10-Q/A', '10-K/A', '20-F', '20-F/A', '6-K', '6-K/A']
 SEC_MAX_REPORT_LAG_DAYS = 200
+MIN_QUARTERLY_DURATION_ROWS = 4
 
 # Keep your XBRL_TAG_MAP, INSTANT_FIELDS, DURATION_FIELDS, MONETARY_COLUMNS
 # (omitted here for brevity in this comment — they are identical to your original map)
@@ -104,6 +105,9 @@ XBRL_TAG_MAP = {
         'FinanceCosts',
         'InterestExpenseOnBorrowings',
         'InterestExpenseBorrowings',
+        'InterestExpenseOnBonds',
+        'InterestExpenseOnOtherFinancialLiabilities',
+        'InterestExpenseOnLeaseLiabilities',
     ],
     'depreciation': [
         'DepreciationDepletionAndAmortization',
@@ -111,6 +115,8 @@ XBRL_TAG_MAP = {
         'DepreciationAmortizationAndAccretionNet',
         'DepreciationAndAmortization',
         'DepreciationAndAmortisationExpense',
+        'DepreciationExpense',
+        'AmortisationExpense',
         'AdjustmentsForDepreciationAndAmortisationExpense',
         'OtherDepreciationAndAmortization',
         'Depreciation',
@@ -132,6 +138,7 @@ XBRL_TAG_MAP = {
         'CapitalExpendituresIncurredButNotYetPaid',
         'PropertyPlantAndEquipmentAdditions',
         'PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities',
+        'PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities',
     ],
     'sga_expense': [
         'SellingGeneralAndAdministrativeExpense',
@@ -163,6 +170,10 @@ XBRL_TAG_MAP = {
         'CapitalLeaseObligationsNoncurrent',
         'LongtermBorrowings',
         'NoncurrentBorrowings',
+        'NoncurrentPortionOfNoncurrentBorrowings',
+        'NoncurrentPortionOfNoncurrentLoansReceived',
+        'NoncurrentPortionOfNoncurrentBondsIssued',
+        'NoncurrentLeaseLiabilities',
         'OtherLongTermDebtNoncurrent',
         'OtherLongTermDebt',
         'UnsecuredLongTermDebt',
@@ -178,6 +189,8 @@ XBRL_TAG_MAP = {
         'LongTermDebtCurrent',
         'CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings',
         'CurrentPortionOfLongtermBorrowings',
+        'CurrentBondsIssuedAndCurrentPortionOfNoncurrentBondsIssued',
+        'CurrentLeaseLiabilities',
         'LongTermDebtAndCapitalLeaseObligationsCurrent',
         'LongTermDebtAndFinanceLeaseObligationsCurrent',
         'DebtAndFinanceLeaseObligationsCurrent',
@@ -199,6 +212,8 @@ XBRL_TAG_MAP = {
         'LongTermDebtAndFinanceLeaseObligations',
         'FinanceLeaseLiability',
         'CapitalLeaseObligations',
+        'LeaseLiabilities',
+        'LiabilitiesArisingFromFinancingActivities',
         'Borrowings',
         'NotesPayable',
         'ConvertibleDebt',
@@ -536,6 +551,20 @@ def _select_unit_entries(units: Dict[str, Any], requested_unit: str):
     return None, None
 
 
+def _has_requested_unit(facts_data: dict, xbrl_tags: List[str], requested_unit: str) -> bool:
+    if not facts_data or requested_unit != "USD":
+        return False
+
+    facts = facts_data.get("facts", {})
+    namespaces = [facts.get("us-gaap", {}), facts.get("ifrs-full", {}), facts.get("dei", {})]
+    for tag in xbrl_tags:
+        for ns in namespaces:
+            tag_obj = ns.get(tag)
+            if tag_obj and requested_unit in (tag_obj.get("units", {}) or {}):
+                return True
+    return False
+
+
 def _dedupe_prefer_original_earliest(df: pd.DataFrame, subset: List[str]) -> pd.DataFrame:
     """
     Deduplicate SEC fact rows for point-in-time use.
@@ -615,6 +644,7 @@ def _extract_fact_series(
     facts = facts_data.get("facts", {})
     namespaces = [facts.get("us-gaap", {}), facts.get("ifrs-full", {}), facts.get("dei", {})]
     tag_rank = {tag: rank for rank, tag in enumerate(xbrl_tags)}
+    strict_requested_unit = unit == "USD" and _has_requested_unit(facts_data, xbrl_tags, unit)
 
     rows = []
     for tag in xbrl_tags:
@@ -628,7 +658,10 @@ def _extract_fact_series(
             continue
 
         units = tag_obj.get("units", {})
-        unit_key, entries = _select_unit_entries(units, unit)
+        if strict_requested_unit:
+            unit_key, entries = unit, units.get(unit)
+        else:
+            unit_key, entries = _select_unit_entries(units, unit)
         if not entries:
             continue
 
@@ -798,6 +831,53 @@ def _extract_quarterly_duration_for_tags(facts_data: dict, xbrl_tags: List[str])
     return result_df
 
 
+def _extract_reported_duration_periods_for_tags(facts_data: dict, xbrl_tags: List[str]) -> pd.DataFrame:
+    """
+    Fallback for foreign filers that report annual/semiannual IFRS facts.
+
+    SEC companyfacts often has 20-F annual values and a few 6-K interim values
+    but no true quarterly concepts. In that case, keep the reported period value
+    instead of trying to force quarterly differencing.
+    """
+    raw = _extract_fact_series(facts_data, xbrl_tags, unit="USD", form_filter=SEC_FORM_FILTER)
+    if raw.empty or "start" not in raw.columns:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    periods = raw.dropna(subset=["start", "end"]).copy()
+    if periods.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    periods["duration_days"] = (periods["end"] - periods["start"]).dt.days
+    periods = periods[(periods["duration_days"] >= 60) & (periods["duration_days"] <= 400)].copy()
+    if periods.empty:
+        return pd.DataFrame(columns=["quarter_end", "value", "filed"])
+
+    # Prefer shorter reported periods when an interim and annual value share an
+    # end date; otherwise keep the earliest filing for PIT alignment.
+    form = periods.get("form", pd.Series("", index=periods.index)).fillna("").astype(str)
+    periods["_amended_rank"] = form.str.endswith("/A").astype(int)
+    periods["_duration_rank"] = periods["duration_days"]
+    sort_cols = ["end", "_duration_rank", "_amended_rank", "filed", "_tag_rank", "accn"]
+    periods = periods.sort_values([c for c in sort_cols if c in periods.columns], kind="mergesort")
+    periods = periods.drop_duplicates(subset=["end"], keep="first")
+    return pd.DataFrame({
+        "quarter_end": periods["end"].values,
+        "value": periods["val"].values,
+        "filed": periods["filed"].values,
+    })
+
+
+def _extract_duration_with_reported_fallback_for_tags(facts_data: dict, xbrl_tags: List[str]) -> pd.DataFrame:
+    series = _extract_quarterly_duration_for_tags(facts_data, xbrl_tags)
+    if len(series) >= MIN_QUARTERLY_DURATION_ROWS:
+        return series
+
+    reported_periods = _extract_reported_duration_periods_for_tags(facts_data, xbrl_tags)
+    if len(reported_periods) > len(series):
+        return reported_periods
+    return series
+
+
 def _merge_quarterly_series(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
     """Fill missing quarter_end rows in primary with fallback rows."""
     if primary is None or primary.empty:
@@ -913,24 +993,24 @@ def _derive_bank_revenue_from_components(facts_data: dict) -> pd.DataFrame:
     """
     net_interest = pd.DataFrame(columns=["quarter_end", "value", "filed"])
     for tags in BANK_REVENUE_NET_INTEREST_TAGS:
-        series = _extract_quarterly_duration_for_tags(facts_data, [tags])
+        series = _extract_duration_with_reported_fallback_for_tags(facts_data, [tags])
         net_interest = _merge_quarterly_series(net_interest, series)
 
-    noninterest = _extract_quarterly_duration_for_tags(facts_data, BANK_REVENUE_NONINTEREST_TAGS)
+    noninterest = _extract_duration_with_reported_fallback_for_tags(facts_data, BANK_REVENUE_NONINTEREST_TAGS)
     return _combine_component_series([net_interest, noninterest])
 
 
 def _derive_gross_profit_from_revenue_and_cost(facts_data: dict) -> pd.DataFrame:
     """Derive gross profit where only revenue and cost of revenue are filed."""
     revenue = _extract_quarterly_duration(facts_data, "revenue")
-    cost_of_revenue = _extract_quarterly_duration_for_tags(facts_data, XBRL_TAG_MAP.get("cost_of_revenue", []))
+    cost_of_revenue = _extract_duration_with_reported_fallback_for_tags(facts_data, XBRL_TAG_MAP.get("cost_of_revenue", []))
     return _subtract_quarterly_series(revenue, cost_of_revenue)
 
 
 def _derive_sga_from_components(facts_data: dict) -> pd.DataFrame:
     """Derive SG&A from separately-filed G&A and selling/marketing concepts."""
-    general_admin = _extract_quarterly_duration_for_tags(facts_data, SGA_GENERAL_ADMIN_TAGS)
-    selling_marketing = _extract_quarterly_duration_for_tags(facts_data, SGA_SELLING_MARKETING_TAGS)
+    general_admin = _extract_duration_with_reported_fallback_for_tags(facts_data, SGA_GENERAL_ADMIN_TAGS)
+    selling_marketing = _extract_duration_with_reported_fallback_for_tags(facts_data, SGA_SELLING_MARKETING_TAGS)
     return _sum_quarterly_component_series([general_admin, selling_marketing], min_components=2)
 
 
@@ -947,7 +1027,7 @@ def _derive_inventory_from_components(facts_data: dict) -> pd.DataFrame:
 
 def _extract_quarterly_duration(facts_data: dict, field_name: str) -> pd.DataFrame:
     tags = XBRL_TAG_MAP.get(field_name, [])
-    series = _extract_quarterly_duration_for_tags(facts_data, tags)
+    series = _extract_duration_with_reported_fallback_for_tags(facts_data, tags)
     if field_name == "revenue":
         bank_revenue = _derive_bank_revenue_from_components(facts_data)
         series = _merge_quarterly_series(series, bank_revenue)
