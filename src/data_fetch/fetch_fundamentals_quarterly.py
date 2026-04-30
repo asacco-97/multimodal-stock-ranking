@@ -13,6 +13,7 @@ import os
 import json
 import time
 import math
+import threading
 import requests
 import yfinance as yf
 import pandas as pd
@@ -24,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from tqdm import tqdm
 from pathlib import Path
+from requests.adapters import HTTPAdapter
 
 # ---------------------------------------------------------------------------
 # IMPORTANT: keep this set to your name/email per SEC policy
@@ -32,7 +34,9 @@ SEC_USER_AGENT = "AnthonySacco amsacco97@gmail.com"
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
-SEC_RATE_LIMIT_DELAY = 0.2  # recommended default (10 req/s -> 0.1s); use conservative 0.2s
+SEC_MAX_REQUESTS_PER_SECOND = float(os.getenv("SEC_MAX_REQUESTS_PER_SECOND", "8.0"))
+SEC_RATE_LIMIT_DELAY = max(0.01, 1.0 / SEC_MAX_REQUESTS_PER_SECOND)
+SEC_FETCH_SUBMISSIONS_METADATA_DEFAULT = os.getenv("SEC_FETCH_SUBMISSIONS_METADATA", "1").lower() not in {"0", "false", "no"}
 
 # SEC filing form types to include (domestic + foreign filers)
 SEC_FORM_FILTER = ['10-Q', '10-K', '10-Q/A', '10-K/A', '20-F', '20-F/A', '6-K', '6-K/A']
@@ -356,6 +360,8 @@ _FX_RATE_CACHE: Dict[str, pd.Series] = {}
 
 # Global throttling control (shared)
 _last_request_time = 0.0
+_rate_limit_lock = threading.Lock()
+_thread_local = threading.local()
 
 
 # -------------------- Helpers: CIK mapping --------------------
@@ -392,20 +398,37 @@ def _load_cik_mapping() -> Dict[str, str]:
 
 
 # -------------------- Helpers: polite SEC fetch with cache --------------------
+def _get_thread_session() -> requests.Session:
+    """
+    Use one Session per worker thread for HTTP keep-alive connection reuse.
+    """
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _thread_local.session = session
+    return session
+
+
 def _polite_get(url: str, headers: dict, timeout: int = 30, max_retries: int = 3):
     """GET with exponential backoff, updates global _last_request_time."""
     global _last_request_time
     attempt = 0
+    session = _get_thread_session()
     while attempt <= max_retries:
-        elapsed = time.time() - _last_request_time
-        if elapsed < SEC_RATE_LIMIT_DELAY:
-            time.sleep(SEC_RATE_LIMIT_DELAY - elapsed)
+        with _rate_limit_lock:
+            elapsed = time.monotonic() - _last_request_time
+            if elapsed < SEC_RATE_LIMIT_DELAY:
+                time.sleep(SEC_RATE_LIMIT_DELAY - elapsed)
+            _last_request_time = time.monotonic()
         try:
-            resp = requests.get(url, headers=headers, timeout=timeout)
-            _last_request_time = time.time()
+            resp = session.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 429:
                 # Backoff
-                wait = 2 ** attempt
+                retry_after = resp.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else (2 ** attempt)
                 time.sleep(wait)
                 attempt += 1
                 continue
@@ -507,13 +530,38 @@ def _fetch_submissions_metadata_cached(cik: str, refresh_cache: bool = False) ->
     }
 
 
-def _fetch_sec_payloads_cached(cik: str, refresh_cache: bool = False) -> Dict[str, Any]:
+def _fetch_sec_payloads_cached(
+    cik: str,
+    refresh_cache: bool = False,
+    refresh_submissions_cache: bool = False,
+) -> Dict[str, Any]:
     """
     Fetch all SEC payloads needed by this pipeline for one CIK.
     """
     return {
         "facts": _fetch_company_facts_cached(cik, refresh_cache=refresh_cache),
-        "meta": _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_cache),
+        "meta": _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_submissions_cache),
+    }
+
+
+def _fetch_sec_payloads_cached_with_options(
+    cik: str,
+    refresh_cache: bool = False,
+    refresh_submissions_cache: bool = False,
+    include_sec_metadata: bool = True,
+) -> Dict[str, Any]:
+    """
+    Same as _fetch_sec_payloads_cached, with optional metadata fetch bypass.
+    """
+    if include_sec_metadata:
+        return _fetch_sec_payloads_cached(
+            cik,
+            refresh_cache=refresh_cache,
+            refresh_submissions_cache=refresh_submissions_cache,
+        )
+    return {
+        "facts": _fetch_company_facts_cached(cik, refresh_cache=refresh_cache),
+        "meta": _default_sec_metadata(),
     }
 
 
@@ -1255,12 +1303,18 @@ def _build_quarterly_dataframe(facts_data: dict) -> Optional[pd.DataFrame]:
 
 
 # -------------------- Public API (preserved signatures) --------------------
-def fetch_quarterly_fundamentals(ticker: str, reporting_lag_days: int = 45, refresh_cache: bool = False) -> Optional[pd.DataFrame]:
+def fetch_quarterly_fundamentals(
+    ticker: str,
+    reporting_lag_days: int = 45,
+    refresh_cache: bool = False,
+    refresh_submissions_cache: bool = False,
+) -> Optional[pd.DataFrame]:
     """
     Fetch quarterly fundamentals for a single ticker (preserves original signature).
     reporting_lag_days kept for compatibility but actual SEC filing dates are used.
 
     refresh_cache: if True, re-download companyfacts JSON for this ticker.
+    refresh_submissions_cache: if True, re-download submissions metadata JSON.
     """
     try:
         cik_map = _load_cik_mapping()
@@ -1270,7 +1324,10 @@ def fetch_quarterly_fundamentals(ticker: str, reporting_lag_days: int = 45, refr
             return None
 
         facts = _fetch_company_facts_cached(cik, refresh_cache=refresh_cache)
-        sec_meta = _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_cache)
+        if SEC_FETCH_SUBMISSIONS_METADATA_DEFAULT:
+            sec_meta = _fetch_submissions_metadata_cached(cik, refresh_cache=refresh_submissions_cache)
+        else:
+            sec_meta = _default_sec_metadata()
         if facts is None:
             print(f"  No EDGAR data for {ticker} (CIK {cik})")
             return None
@@ -1343,13 +1400,19 @@ def fetch_all_quarterly_fundamentals(
     reporting_lag_days: int = 45,
     max_workers: int = 4,
     refresh_cache: bool = False,
+    refresh_submissions_cache: bool = False,
+    include_sec_metadata: bool = SEC_FETCH_SUBMISSIONS_METADATA_DEFAULT,
 ) -> pd.DataFrame:
     """
     Fetch quarterly fundamentals for a list of tickers. Uses controlled parallelism,
     per-CIK caching, and returns a combined DataFrame (and writes parquet to save_dir).
 
-    max_workers: number of concurrent threads (keep small to respect SEC)
+    max_workers: number of concurrent threads
     refresh_cache: if True forces re-download of companyfacts JSONs
+    refresh_submissions_cache: if True forces re-download of submissions metadata JSONs
+    include_sec_metadata: fetch per-ticker SEC submissions metadata (sic/sic2).
+        Disabling this removes one SEC request per ticker and can materially speed
+        up large runs.
     """
     os.makedirs(save_dir, exist_ok=True)
     _load_cik_mapping()
@@ -1362,8 +1425,18 @@ def fetch_all_quarterly_fundamentals(
 
     print(f"Fetching quarterly fundamentals from SEC EDGAR for {len(tickers)} tickers...")
     print(f"Using actual SEC filing dates (no estimated lag). Workers={max_workers}")
+    print(
+        f"SEC throttle: {SEC_MAX_REQUESTS_PER_SECOND:.2f} req/s "
+        f"(delay={SEC_RATE_LIMIT_DELAY:.3f}s), include_sec_metadata={include_sec_metadata}, "
+        f"refresh_cache={refresh_cache}, refresh_submissions_cache={refresh_submissions_cache}"
+    )
 
-    fetch_partial = partial(_fetch_sec_payloads_cached, refresh_cache=refresh_cache)
+    fetch_partial = partial(
+        _fetch_sec_payloads_cached_with_options,
+        refresh_cache=refresh_cache,
+        refresh_submissions_cache=refresh_submissions_cache,
+        include_sec_metadata=include_sec_metadata,
+    )
     cik_map = _load_cik_mapping()
 
     # Fetch SEC payloads (companyfacts + submissions metadata) in parallel, then
@@ -1560,6 +1633,16 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default=None, help="Override output directory")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers (keep small for SEC)")
     parser.add_argument("--refresh_cache", action="store_true", help="Refresh SEC companyfacts cache")
+    parser.add_argument(
+        "--refresh_submissions_cache",
+        action="store_true",
+        help="Refresh SEC submissions metadata cache (sic/sic2)",
+    )
+    parser.add_argument(
+        "--no_sec_metadata",
+        action="store_true",
+        help="Skip SEC submissions metadata (sic/sic2) for faster large-scale fetches",
+    )
     args = parser.parse_args()
 
     data_tag = args.data_tag or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1571,7 +1654,12 @@ if __name__ == "__main__":
     print(f"Output dir: {save_dir}")
 
     fundamentals_df = fetch_all_quarterly_fundamentals(
-        tickers, save_dir=save_dir, max_workers=args.workers, refresh_cache=args.refresh_cache
+        tickers,
+        save_dir=save_dir,
+        max_workers=args.workers,
+        refresh_cache=args.refresh_cache,
+        refresh_submissions_cache=args.refresh_submissions_cache,
+        include_sec_metadata=(not args.no_sec_metadata),
     )
     fundamentals_df = _filter_by_date_window(
         fundamentals_df,
