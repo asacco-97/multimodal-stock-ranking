@@ -295,16 +295,6 @@ def _compute_accounting_proxies(monthly: pd.DataFrame) -> pd.DataFrame:
     )
     monthly["indmom"] = monthly.groupby(["month_end", "industry"])["mom12m"].transform("mean")
 
-    sin_industries = {"tobacco", "alcohol", "gaming", "casino", "coal", "oil", "weapon", "defense"}
-    ind = (
-        monthly.get("industry", pd.Series(index=monthly.index, dtype="object"))
-        .astype("string")
-        .fillna("")
-        .str.lower()
-    )
-    sin_pattern = "|".join(sorted(sin_industries))
-    monthly["sin"] = ind.str.contains(sin_pattern, regex=True, na=False).astype(float)
-
     # Ensure no accidental carry from helper columns for GKX names only later.
     return monthly
 
