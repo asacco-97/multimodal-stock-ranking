@@ -239,8 +239,11 @@ def build_model_df(
     macro_interaction_cols: Optional[List[str]] = None,
     firm_interaction_cols: Optional[List[str]] = None,
     include_macro_firm_interactions: bool = True,
+    macro_lag_months: int = 1,
 ) -> pd.DataFrame:
     macro_cols = macro_cols or DEFAULT_MACRO_COLS
+    if macro_lag_months < 1:
+        raise ValueError("macro_lag_months must be >= 1 to avoid look-ahead leakage.")
     ff = _load_ff_risk_free(ff_factors_path)
 
     daily = daily_df.copy()
@@ -268,6 +271,10 @@ def build_model_df(
 
     macro_monthly, macro_available = _build_monthly_macro_snapshot(daily, macro_cols)
     macro_monthly, macro_feature_cols = _add_macro_derived_features(macro_monthly, macro_available)
+    macro_monthly_lagged = macro_monthly.copy()
+    macro_monthly_lagged["month_end"] = (
+        pd.to_datetime(macro_monthly_lagged["month_end"]) + pd.offsets.MonthEnd(macro_lag_months)
+    )
 
     df = gkx_df.merge(
         px_m[["ticker", "month_end", "RF", "ret_eom_t+1", "ret_eom_t+1_excess"]],
@@ -276,7 +283,7 @@ def build_model_df(
     )
     df = df.merge(df_spy, on="month_end", how="left")
     if macro_feature_cols:
-        df = df.merge(macro_monthly[["month_end"] + macro_feature_cols], on="month_end", how="left")
+        df = df.merge(macro_monthly_lagged[["month_end"] + macro_feature_cols], on="month_end", how="left")
 
     ticker_sic2 = _build_ticker_sic2_map(daily)
     if not ticker_sic2.empty:
@@ -341,6 +348,12 @@ if __name__ == "__main__":
     parser.add_argument("--universe_file", type=str, default=None, help="Universe CSV with is_etf for ETF filtering")
     parser.add_argument("--macro_cols", type=str, default=None, help="Comma-separated macro columns override")
     parser.add_argument(
+        "--macro_lag_months",
+        type=int,
+        default=1,
+        help="Lag macro block by N month-ends before merge (must be >=1; default=1 for safety).",
+    )
+    parser.add_argument(
         "--macro_interaction_cols",
         type=str,
         default=None,
@@ -376,6 +389,7 @@ if __name__ == "__main__":
         macro_interaction_cols=_parse_csv_list(args.macro_interaction_cols),
         firm_interaction_cols=_parse_csv_list(args.firm_interaction_cols),
         include_macro_firm_interactions=not args.no_macro_firm_interactions,
+        macro_lag_months=args.macro_lag_months,
     )
     model_df.to_parquet(output_path, index=False)
     print(f"Saved model_df base to: {output_path}")
