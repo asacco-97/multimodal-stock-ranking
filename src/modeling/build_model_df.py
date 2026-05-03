@@ -17,28 +17,16 @@ from src.features.gkx_registry import GKX_94
 
 
 DEFAULT_MACRO_COLS = [
-    "DFF",
-    "DGS10",
-    "DGS2",
-    "T10Y2Y",
-    "CPIAUCSL",
-    "CPILFESL",
-    "PCEPI",
-    "GDP",
-    "GDPC1",
-    "INDPRO",
-    "UNRATE",
-    "PAYEMS",
-    "ICSA",
-    "UMCSENT",
-    "RSXFS",
-    "VIXCLS",
-    "DCOILWTICO",
-    "M2SL",
-    "TOTALSL",
+    "DFF",        # short rate 
+    "T10Y2Y",     # term spread
+    "CPIAUCSL",   # inflation 
+    "INDPRO",     # industrial production 
+    "UNRATE",     # labor market 
+    "UMCSENT",    # sentiment 
+    "VIXCLS",     # volatility / risk proxy 
 ]
 
-# By default, interact SIC2 dummies with the raw monthly macro block.
+# By default, interact firm characteristics with the raw monthly macro block.
 DEFAULT_MACRO_INTERACTION_COLS = list(DEFAULT_MACRO_COLS)
 
 SIC_SOURCE_COLS = ("sic2", "sic", "sic_code", "sic_cd", "SIC", "SICCD")
@@ -152,8 +140,8 @@ def _add_macro_derived_features(
     out["macro_indpro_yoy"] = _safe_pct_change(_series_or_nan(out, "INDPRO"), 12)
     out["macro_unrate"] = _series_or_nan(out, "UNRATE")
     out["macro_vix"] = _series_or_nan(out, "VIXCLS")
-    out["macro_oil_yoy"] = _safe_pct_change(_series_or_nan(out, "DCOILWTICO"), 12)
-    out["macro_m2_yoy"] = _safe_pct_change(_series_or_nan(out, "M2SL"), 12)
+    # out["macro_oil_yoy"] = _safe_pct_change(_series_or_nan(out, "DCOILWTICO"), 12)
+    # out["macro_m2_yoy"] = _safe_pct_change(_series_or_nan(out, "M2SL"), 12)
 
     paper_style_cols = [
         "macro_rate_dff",
@@ -162,8 +150,8 @@ def _add_macro_derived_features(
         "macro_indpro_yoy",
         "macro_unrate",
         "macro_vix",
-        "macro_oil_yoy",
-        "macro_m2_yoy",
+        # "macro_oil_yoy",
+        # "macro_m2_yoy",
     ]
     derived_cols.extend(paper_style_cols)
 
@@ -220,36 +208,22 @@ def _build_sic2_dummies(sic2: pd.Series) -> Tuple[pd.DataFrame, List[str]]:
     return dummies, list(dummies.columns)
 
 
-def _build_macro_sic_interactions(
+def _build_macro_firm_interactions(
     df: pd.DataFrame,
     macro_cols: Sequence[str],
-    sic2_col: str = "sic2",
-    top_n_sic2: Optional[int] = 20,
+    firm_cols: Sequence[str],
 ) -> Tuple[pd.DataFrame, List[str]]:
-    if not macro_cols or sic2_col not in df.columns:
-        return pd.DataFrame(index=df.index), []
-
-    sic2_numeric = pd.to_numeric(df[sic2_col], errors="coerce")
-    sic2_freq = sic2_numeric.dropna()
-    if sic2_freq.empty:
-        return pd.DataFrame(index=df.index), []
-
-    sic2_counts = sic2_freq.astype(np.int64).value_counts()
-    if top_n_sic2 is not None and top_n_sic2 > 0:
-        sic2_counts = sic2_counts.head(top_n_sic2)
-    sic2_values = sorted(int(v) for v in sic2_counts.index if np.isfinite(v))
-    if not sic2_values:
+    if not macro_cols or not firm_cols:
         return pd.DataFrame(index=df.index), []
 
     macro_block = df[list(macro_cols)].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+    firm_block = df[list(firm_cols)].apply(pd.to_numeric, errors="coerce").astype(np.float32)
 
     frames: List[pd.DataFrame] = []
     names: List[str] = []
-    for sic2_value in sic2_values:
-        sic2_label = f"{sic2_value:02d}"
-        mask = (sic2_numeric == sic2_value).astype(np.float32)
-        interaction = macro_block.mul(mask, axis=0)
-        interaction.columns = [f"{sic2_label}__x__{macro_col}" for macro_col in macro_cols]
+    for firm_col in firm_cols:
+        interaction = macro_block.mul(firm_block[firm_col], axis=0)
+        interaction.columns = [f"{firm_col}__x__{macro_col}" for macro_col in macro_cols]
         frames.append(interaction)
         names.extend(interaction.columns.tolist())
 
@@ -263,7 +237,8 @@ def build_model_df(
     universe_file: Optional[str] = None,
     macro_cols: Optional[List[str]] = None,
     macro_interaction_cols: Optional[List[str]] = None,
-    include_macro_sic_interactions: bool = True,
+    firm_interaction_cols: Optional[List[str]] = None,
+    include_macro_firm_interactions: bool = True,
 ) -> pd.DataFrame:
     macro_cols = macro_cols or DEFAULT_MACRO_COLS
     ff = _load_ff_risk_free(ff_factors_path)
@@ -309,19 +284,19 @@ def build_model_df(
     else:
         df["sic2"] = np.nan
     df["sic2"] = _coerce_sic2(df["sic2"])
-    if df["sic2"].notna().sum() == 0:
-        print("Warning: sic2 is fully missing; macro x SIC2 interactions will not be generated.")
-
     sic_dummies, sic_dummy_cols = _build_sic2_dummies(df["sic2"])
     if sic_dummy_cols:
         df = pd.concat([df, sic_dummies], axis=1)
 
+    gkx_cols = [c for c in GKX_94 if c in df.columns]
     interaction_cols: List[str] = []
     interaction_base_cols = macro_interaction_cols or macro_available or DEFAULT_MACRO_INTERACTION_COLS
+    interaction_firm_base_cols = firm_interaction_cols or gkx_cols
     interaction_macro_available = [c for c in interaction_base_cols if c in df.columns]
-    if include_macro_sic_interactions and interaction_macro_available:
-        interaction_df, interaction_cols = _build_macro_sic_interactions(
-            df, interaction_macro_available, sic2_col="sic2"
+    interaction_firm_available = [c for c in interaction_firm_base_cols if c in df.columns]
+    if include_macro_firm_interactions and interaction_macro_available and interaction_firm_available:
+        interaction_df, interaction_cols = _build_macro_firm_interactions(
+            df, interaction_macro_available, interaction_firm_available
         )
         df = pd.concat([df, interaction_df], axis=1)
 
@@ -333,7 +308,6 @@ def build_model_df(
     hi = df.groupby("month_end")["ret_eom_t+1_excess"].transform(lambda x: x.quantile(0.99))
     df["ret_eom_t+1_excess"] = df["ret_eom_t+1_excess"].clip(lower=lo, upper=hi)
 
-    gkx_cols = [c for c in GKX_94 if c in df.columns]
     feature_cols = _dedupe_keep_order(
         gkx_cols + [c for c in macro_feature_cols if c in df.columns] + sic_dummy_cols + interaction_cols
     )
@@ -370,12 +344,18 @@ if __name__ == "__main__":
         "--macro_interaction_cols",
         type=str,
         default=None,
-        help="Comma-separated macro columns used for macro x SIC interactions",
+        help="Comma-separated macro columns used for macro x firm interactions",
     )
     parser.add_argument(
-        "--no_macro_sic_interactions",
+        "--firm_interaction_cols",
+        type=str,
+        default=None,
+        help="Comma-separated firm characteristic columns used for macro x firm interactions",
+    )
+    parser.add_argument(
+        "--no_macro_firm_interactions",
         action="store_true",
-        help="Disable macro x SIC interaction feature generation",
+        help="Disable macro x firm interaction feature generation",
     )
     parser.add_argument("--output", type=str, default=None, help="Override output parquet path")
     args = parser.parse_args()
@@ -394,7 +374,8 @@ if __name__ == "__main__":
         universe_file=args.universe_file,
         macro_cols=_parse_csv_list(args.macro_cols),
         macro_interaction_cols=_parse_csv_list(args.macro_interaction_cols),
-        include_macro_sic_interactions=not args.no_macro_sic_interactions,
+        firm_interaction_cols=_parse_csv_list(args.firm_interaction_cols),
+        include_macro_firm_interactions=not args.no_macro_firm_interactions,
     )
     model_df.to_parquet(output_path, index=False)
     print(f"Saved model_df base to: {output_path}")
